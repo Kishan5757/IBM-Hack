@@ -15,12 +15,58 @@ import {
   Package,
 } from "lucide-react";
 
-const ORBIT_FEATURES = [
-  { label: "Setup Assistant", icon: Rocket, color: "from-indigo-500 to-indigo-700" },
-  { label: "Test Generator", icon: TestTube2, color: "from-emerald-500 to-emerald-700" },
-  { label: "README Automation", icon: FileText, color: "from-amber-500 to-amber-700" },
-  { label: "Dead Code Detector", icon: Trash2, color: "from-rose-500 to-rose-700" },
-  { label: "Dependency Analyzer", icon: Package, color: "from-purple-500 to-purple-700" },
+// Each planet's visual personality
+const PLANETS = [
+  {
+    label: "Setup Assistant",
+    icon: Rocket,
+    color: "#6366f1",        // indigo
+    glow: "rgba(99,102,241,0.6)",
+    size: 48,
+    orbitRadius: 230,
+    speed: 22,
+    emoji: "🚀",
+  },
+  {
+    label: "Test Generator",
+    icon: TestTube2,
+    color: "#10b981",        // emerald
+    glow: "rgba(16,185,129,0.6)",
+    size: 44,
+    orbitRadius: 230,
+    speed: 22,
+    emoji: "🧪",
+  },
+  {
+    label: "README Automation",
+    icon: FileText,
+    color: "#f59e0b",        // amber
+    glow: "rgba(245,158,11,0.6)",
+    size: 50,
+    orbitRadius: 230,
+    speed: 22,
+    emoji: "📄",
+  },
+  {
+    label: "Dead Code Detector",
+    icon: Trash2,
+    color: "#ef4444",        // rose
+    glow: "rgba(239,68,68,0.6)",
+    size: 42,
+    orbitRadius: 230,
+    speed: 22,
+    emoji: "🗑️",
+  },
+  {
+    label: "Dependency Analyzer",
+    icon: Package,
+    color: "#a855f7",        // purple
+    glow: "rgba(168,85,247,0.6)",
+    size: 46,
+    orbitRadius: 230,
+    speed: 22,
+    emoji: "📦",
+  },
 ];
 
 export default function OrbitLanding({ onAnalyze, darkMode, toggleDark }) {
@@ -30,17 +76,19 @@ export default function OrbitLanding({ onAnalyze, darkMode, toggleDark }) {
   const [progress, setProgress] = useState(0);
   const inputRef = useRef(null);
 
-  const startScan = () => {
+  const startScan = (inputUrl, uploadedFile = null) => {
+    const repoUrl = inputUrl || url;
     setScanning(true);
     setProgress(0);
     const start = Date.now();
     const tick = setInterval(() => {
       const elapsed = Date.now() - start;
-      const pct = Math.min((elapsed / 1500) * 100, 100);
+      const pct = Math.min((elapsed / 1800) * 100, 100);
       setProgress(Math.round(pct));
       if (pct >= 100) {
         clearInterval(tick);
-        setTimeout(onAnalyze, 150);
+        // Pass both the URL/name AND the actual File object upstream
+        setTimeout(() => onAnalyze(repoUrl, uploadedFile), 150);
       }
     }, 30);
   };
@@ -48,136 +96,243 @@ export default function OrbitLanding({ onAnalyze, darkMode, toggleDark }) {
   const handleDrop = (e) => {
     e.preventDefault();
     setDragging(false);
-    startScan();
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      startScan(file.name, file);
+    } else {
+      startScan(url);
+    }
   };
 
+  const handleKey = (e) => {
+    if (e.key === "Enter" && url.trim()) startScan(url.trim());
+  };
+
+  // Solar system size — fills the whole viewport
+  const ORBIT_SIZE = 520; // diameter of orbit ring (CSS pixels)
+  const CENTER = ORBIT_SIZE / 2;
+
   return (
-    <div className={`min-h-screen flex flex-col transition-colors duration-500 ${darkMode ? "bg-slate-950 text-white" : "bg-slate-100 text-slate-900"}`}>
+    <div
+      className={`min-h-screen flex flex-col transition-colors duration-500 overflow-hidden ${
+        darkMode
+          ? "bg-slate-950 text-white"
+          : "bg-gradient-to-br from-slate-100 via-blue-50 to-indigo-100 text-slate-900"
+      }`}
+    >
+      {/* Starfield dots — dark mode only */}
+      {darkMode && <Starfield />}
+
       {/* Top bar */}
-      <header className="flex items-center justify-between px-6 py-4 z-50">
+      <header className="flex items-center justify-between px-6 py-4 z-50 relative">
         <div className="flex items-center gap-2">
           <GitBranch className={`w-6 h-6 ${darkMode ? "text-indigo-400" : "text-indigo-600"}`} />
           <span className={`font-bold text-xl tracking-tight ${darkMode ? "text-white" : "text-slate-900"}`}>
-            RepoPilot
+            Repo<span className="text-indigo-500">Pilot</span>
           </span>
         </div>
         <button
           onClick={toggleDark}
-          className={`p-2 rounded-full border transition-all ${darkMode ? "border-slate-700 bg-slate-800 text-yellow-300 hover:bg-slate-700" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-200"}`}
+          className={`p-2 rounded-full border transition-all ${
+            darkMode
+              ? "border-slate-700 bg-slate-800 text-yellow-300 hover:bg-slate-700"
+              : "border-slate-300 bg-white text-slate-700 hover:bg-slate-200"
+          }`}
         >
           {darkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
         </button>
       </header>
 
-      {/* Hero */}
-      <main className="flex-1 flex flex-col items-center justify-center relative overflow-hidden px-4">
-        {/* Orbit ring */}
-        <div className="absolute w-[520px] h-[520px] md:w-[620px] md:h-[620px]" style={{ top: "50%", left: "50%", transform: "translate(-50%, -50%)" }}>
-          {/* Ring circle */}
-          <div className={`absolute inset-0 rounded-full border-2 border-dashed animate-spin-slow ${darkMode ? "border-indigo-800/40" : "border-indigo-300/60"}`} />
-          {ORBIT_FEATURES.map((feat, i) => (
-            <OrbitBadge key={feat.label} feature={feat} index={i} total={ORBIT_FEATURES.length} />
+      {/* Solar System */}
+      <main className="flex-1 flex items-center justify-center relative" style={{ minHeight: "calc(100vh - 70px)" }}>
+
+        {/* Orbit ring container — absolutely centred */}
+        <div
+          className="absolute"
+          style={{
+            width: ORBIT_SIZE,
+            height: ORBIT_SIZE,
+            top: "50%",
+            left: "50%",
+            transform: "translate(-50%, -50%)",
+          }}
+        >
+          {/* Outer dashed orbit ring */}
+          <div
+            className={`absolute inset-0 rounded-full border-2 border-dashed animate-spin-slow pointer-events-none ${
+              darkMode ? "border-white/10" : "border-slate-400/20"
+            }`}
+          />
+          {/* Inner glow ring */}
+          <div
+            className={`absolute rounded-full pointer-events-none animate-spin-reverse ${
+              darkMode ? "border border-indigo-500/15" : "border border-indigo-300/30"
+            }`}
+            style={{ inset: 28 }}
+          />
+
+          {/* 5 Planets */}
+          {PLANETS.map((planet, i) => (
+            <Planet
+              key={planet.label}
+              planet={planet}
+              index={i}
+              total={PLANETS.length}
+              orbitDiameter={ORBIT_SIZE}
+              darkMode={darkMode}
+            />
           ))}
         </div>
 
-        {/* Center card */}
+        {/* Sun / Central card */}
         <motion.div
-          initial={{ opacity: 0, scale: 0.9 }}
+          initial={{ opacity: 0, scale: 0.7 }}
           animate={{ opacity: 1, scale: 1 }}
-          transition={{ duration: 0.6, ease: "easeOut" }}
-          className="relative z-10 w-full max-w-md"
+          transition={{ duration: 0.8, ease: [0.34, 1.56, 0.64, 1] }}
+          className="relative z-20"
         >
-          <div className={`rounded-2xl border shadow-2xl p-8 backdrop-blur-sm ${darkMode ? "bg-slate-900/90 border-slate-700/60" : "bg-white/90 border-slate-200"}`}>
-            {/* Title */}
-            <div className="text-center mb-6">
-              <h1 className={`text-4xl font-extrabold tracking-tight mb-2 ${darkMode ? "text-white" : "text-slate-900"}`}>
-                Repo<span className="text-indigo-500">Pilot</span>
-              </h1>
-              <p className={`text-sm ${darkMode ? "text-slate-400" : "text-slate-600"}`}>
-                Your AI Co-Pilot for Codebase Health
-              </p>
-            </div>
+          {/* Sun glow ring */}
+          <div
+            className="absolute inset-0 rounded-full pointer-events-none"
+            style={{
+              background: darkMode
+                ? "radial-gradient(circle, rgba(251,191,36,0.18) 0%, rgba(251,191,36,0) 70%)"
+                : "radial-gradient(circle, rgba(99,102,241,0.15) 0%, rgba(99,102,241,0) 70%)",
+              transform: "scale(2.2)",
+            }}
+          />
+
+          {/* Circular card */}
+          <div
+            className={`rounded-full shadow-2xl flex flex-col items-center justify-center relative overflow-hidden ${
+              darkMode
+                ? "bg-slate-900/95 border-2 border-yellow-400/40 animate-sun-pulse"
+                : "bg-white/90 border-2 border-indigo-300/60"
+            }`}
+            style={{ width: 280, height: 280 }}
+          >
+            {/* Radial gradient inner glow */}
+            <div
+              className="absolute inset-0 rounded-full pointer-events-none"
+              style={{
+                background: darkMode
+                  ? "radial-gradient(circle at 50% 30%, rgba(251,191,36,0.12), transparent 70%)"
+                  : "radial-gradient(circle at 50% 30%, rgba(99,102,241,0.1), transparent 70%)",
+              }}
+            />
 
             <AnimatePresence mode="wait">
               {!scanning ? (
-                <motion.div key="form" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                  {/* Dropzone */}
+                <motion.div
+                  key="form"
+                  initial={{ opacity: 0, scale: 0.9 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.9 }}
+                  className="flex flex-col items-center justify-center w-full h-full px-6 py-4 gap-3"
+                >
+                  {/* Title */}
+                  <div className="text-center">
+                    <h1 className={`text-2xl font-extrabold tracking-tight leading-tight ${darkMode ? "text-white" : "text-slate-900"}`}>
+                      Repo<span className="text-indigo-400">Pilot</span>
+                    </h1>
+                    <p className={`text-[10px] mt-0.5 ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
+                      AI Co-Pilot for Codebase Health
+                    </p>
+                  </div>
+
+                  {/* URL input */}
+                  <div
+                    className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 w-full ${
+                      darkMode ? "bg-slate-800 border-slate-600" : "bg-slate-50 border-slate-300"
+                    }`}
+                  >
+                    <Link2 className={`w-3 h-3 flex-shrink-0 ${darkMode ? "text-slate-500" : "text-slate-400"}`} />
+                    <input
+                      type="text"
+                      value={url}
+                      onChange={(e) => setUrl(e.target.value)}
+                      onKeyDown={handleKey}
+                      placeholder="github.com/org/repo"
+                      className={`flex-1 bg-transparent text-xs outline-none placeholder:text-slate-500 ${darkMode ? "text-white" : "text-slate-900"}`}
+                    />
+                  </div>
+
+                  {/* Drop zone mini */}
                   <div
                     onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
                     onDragLeave={() => setDragging(false)}
                     onDrop={handleDrop}
                     onClick={() => inputRef.current?.click()}
-                    className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer mb-4 transition-all duration-200 ${
+                    className={`border border-dashed rounded-full w-full py-1.5 text-center cursor-pointer transition-all text-[10px] ${
                       dragging
-                        ? "border-indigo-500 bg-indigo-500/10 scale-105"
+                        ? "border-indigo-400 bg-indigo-500/15 text-indigo-400"
                         : darkMode
-                        ? "border-slate-600 hover:border-indigo-500 hover:bg-indigo-500/5"
-                        : "border-slate-300 hover:border-indigo-400 hover:bg-indigo-50"
+                        ? "border-slate-600 text-slate-500 hover:border-slate-400"
+                        : "border-slate-300 text-slate-400 hover:border-indigo-400"
                     }`}
                   >
-                    <input ref={inputRef} type="file" className="hidden" onChange={startScan} />
-                    <Upload className={`w-8 h-8 mx-auto mb-2 ${darkMode ? "text-slate-500" : "text-slate-400"}`} />
-                    <p className={`text-sm font-medium ${darkMode ? "text-slate-300" : "text-slate-700"}`}>
-                      Drop your repo archive here
-                    </p>
-                    <p className={`text-xs mt-1 ${darkMode ? "text-slate-500" : "text-slate-500"}`}>
-                      .zip, .tar.gz — or paste a GitHub URL below
-                    </p>
-                  </div>
-
-                  {/* URL input */}
-                  <div className={`flex items-center gap-2 rounded-xl border px-3 py-2 mb-4 ${darkMode ? "bg-slate-800 border-slate-600" : "bg-slate-50 border-slate-300"}`}>
-                    <Link2 className={`w-4 h-4 flex-shrink-0 ${darkMode ? "text-slate-500" : "text-slate-400"}`} />
-                    <input
-                      type="text"
-                      value={url}
-                      onChange={(e) => setUrl(e.target.value)}
-                      placeholder="https://github.com/org/repo"
-                      className={`flex-1 bg-transparent text-sm outline-none placeholder:text-slate-500 ${darkMode ? "text-white" : "text-slate-900"}`}
-                    />
+                    <input ref={inputRef} type="file" accept=".zip" className="hidden" onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) startScan(f.name, f);
+                    }} />
+                    <Upload className="w-3 h-3 inline mr-1" />
+                    Drop archive or click
                   </div>
 
                   {/* CTA Button */}
                   <button
-                    onClick={startScan}
-                    className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 active:scale-95 transition-all font-semibold text-white shadow-lg shadow-indigo-500/30"
+                    onClick={() => startScan(url)}
+                    className="w-full flex items-center justify-center gap-1.5 py-2 rounded-full bg-indigo-600 hover:bg-indigo-500 active:scale-95 transition-all font-semibold text-white shadow-lg shadow-indigo-500/40 text-xs"
                   >
-                    <Zap className="w-4 h-4" />
+                    <Zap className="w-3 h-3" />
                     Analyze Repository
                   </button>
                 </motion.div>
               ) : (
-                <motion.div key="scan" initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="text-center py-4">
-                  <div className="relative w-20 h-20 mx-auto mb-4">
-                    <svg className="w-20 h-20 -rotate-90" viewBox="0 0 80 80">
-                      <circle cx="40" cy="40" r="34" fill="none" stroke={darkMode ? "#1e293b" : "#e2e8f0"} strokeWidth="6" />
+                <motion.div
+                  key="scan"
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  className="flex flex-col items-center justify-center gap-3 px-4"
+                >
+                  <div className="relative w-16 h-16">
+                    <svg className="w-16 h-16 -rotate-90" viewBox="0 0 64 64">
+                      <circle cx="32" cy="32" r="26" fill="none" stroke={darkMode ? "#1e293b" : "#e2e8f0"} strokeWidth="5" />
                       <circle
-                        cx="40" cy="40" r="34"
+                        cx="32" cy="32" r="26"
                         fill="none"
-                        stroke="#6366f1"
-                        strokeWidth="6"
-                        strokeDasharray={`${2 * Math.PI * 34}`}
-                        strokeDashoffset={`${2 * Math.PI * 34 * (1 - progress / 100)}`}
+                        stroke={darkMode ? "#fbbf24" : "#6366f1"}
+                        strokeWidth="5"
+                        strokeDasharray={`${2 * Math.PI * 26}`}
+                        strokeDashoffset={`${2 * Math.PI * 26 * (1 - progress / 100)}`}
                         strokeLinecap="round"
                         style={{ transition: "stroke-dashoffset 0.03s linear" }}
                       />
                     </svg>
-                    <span className="absolute inset-0 flex items-center justify-center text-lg font-bold text-indigo-500">{progress}%</span>
+                    <span className={`absolute inset-0 flex items-center justify-center text-sm font-bold ${darkMode ? "text-yellow-400" : "text-indigo-500"}`}>
+                      {progress}%
+                    </span>
                   </div>
-                  <p className={`font-semibold ${darkMode ? "text-white" : "text-slate-900"}`}>AI Scanning...</p>
-                  <p className={`text-sm mt-1 ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Analyzing codebase structure & health</p>
+                  <div className="text-center">
+                    <p className={`font-semibold text-sm ${darkMode ? "text-white" : "text-slate-900"}`}>🤖 AI Scanning...</p>
+                    <p className={`text-[10px] mt-0.5 ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
+                      Analyzing codebase & detecting patterns
+                    </p>
+                  </div>
                 </motion.div>
               )}
             </AnimatePresence>
           </div>
         </motion.div>
 
-        {/* Tagline */}
+        {/* Bottom tagline */}
         <motion.p
-          initial={{ opacity: 0, y: 10 }}
+          initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.8 }}
-          className={`mt-8 text-xs text-center z-10 ${darkMode ? "text-slate-500" : "text-slate-400"}`}
+          transition={{ delay: 1 }}
+          className={`absolute bottom-8 left-0 right-0 text-center text-xs z-10 ${
+            darkMode ? "text-slate-600" : "text-slate-400"
+          }`}
         >
           Instant AI analysis · No sign-up required · 5 tools in one workspace
         </motion.p>
@@ -186,41 +341,98 @@ export default function OrbitLanding({ onAnalyze, darkMode, toggleDark }) {
   );
 }
 
-// Each badge sits at its evenly-spaced angle and rotates with the ring.
-// The counter-rotation on the inner div keeps the label text upright.
-function OrbitBadge({ feature, index, total }) {
-  const Icon = feature.icon;
-  const startDeg = (index / total) * 360;   // initial position on ring
-  const radius = 260;                        // px — matches the CSS keyframe translateY
+/* ─── Planet component ─────────────────────────────────────────── */
+function Planet({ planet, index, total, orbitDiameter, darkMode }) {
+  const Icon = planet.icon;
+  const startDeg = (index / total) * 360;
+  const orbitRadius = orbitDiameter / 2; // px from center to planet center
 
   return (
     <div
       className="absolute inset-0"
       style={{
-        "--orbit-start": `${startDeg}deg`,
-        animation: `orbit 20s linear infinite`,
-        animationDelay: `-${(index / total) * 20}s`,
+        "--planet-start": `${startDeg}deg`,
+        animation: `solar-orbit ${planet.speed}s linear infinite`,
+        animationDelay: `-${(index / total) * planet.speed}s`,
         transformOrigin: "center center",
       }}
     >
-      {/* Badge sits at the top of the rotated layer */}
+      {/* Planet sits at top of orbit layer */}
       <div
         className="absolute left-1/2"
         style={{
-          top: `calc(50% - ${radius}px)`,
+          top: `calc(50% - ${orbitRadius}px)`,
           transform: "translateX(-50%)",
-          // Counter-rotate so text stays horizontal as the ring spins
-          animation: `orbit-counter 20s linear infinite`,
-          animationDelay: `-${(index / total) * 20}s`,
+          animation: `solar-counter ${planet.speed}s linear infinite`,
+          animationDelay: `-${(index / total) * planet.speed}s`,
         }}
       >
-        <div
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium shadow-lg whitespace-nowrap bg-gradient-to-r ${feature.color} text-white`}
+        <motion.div
+          initial={{ scale: 0, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          transition={{ delay: 0.3 + index * 0.12, type: "spring", stiffness: 260, damping: 18 }}
         >
-          <Icon className="w-3.5 h-3.5 flex-shrink-0" />
-          {feature.label}
-        </div>
+          {/* Planet sphere */}
+          <div
+            className="rounded-full flex flex-col items-center justify-center shadow-2xl relative cursor-default select-none"
+            style={{
+              width: planet.size + 20,
+              height: planet.size + 20,
+              background: `radial-gradient(circle at 35% 35%, ${planet.color}ee, ${planet.color}88)`,
+              boxShadow: `0 0 18px 4px ${planet.glow}, inset 0 2px 6px rgba(255,255,255,0.3)`,
+              border: `2px solid ${planet.color}55`,
+            }}
+          >
+            {/* Highlight spot */}
+            <div
+              className="absolute rounded-full bg-white/25"
+              style={{ width: 10, height: 10, top: 8, left: 10 }}
+            />
+            <Icon className="w-4 h-4 text-white/90" />
+          </div>
+
+          {/* Label below planet */}
+          <div
+            className={`mt-1.5 px-2 py-0.5 rounded-full text-center whitespace-nowrap text-[9px] font-semibold ${
+              darkMode
+                ? "bg-slate-800/80 text-slate-300 border border-slate-600/60"
+                : "bg-white/80 text-slate-700 border border-slate-200/80"
+            }`}
+            style={{ maxWidth: 100, backdropFilter: "blur(8px)" }}
+          >
+            {planet.label}
+          </div>
+        </motion.div>
       </div>
+    </div>
+  );
+}
+
+/* ─── Starfield ─────────────────────────────────────────────────── */
+function Starfield() {
+  const stars = Array.from({ length: 80 }, (_, i) => ({
+    id: i,
+    x: Math.random() * 100,
+    y: Math.random() * 100,
+    size: Math.random() * 2 + 0.5,
+    opacity: Math.random() * 0.6 + 0.1,
+  }));
+
+  return (
+    <div className="fixed inset-0 pointer-events-none z-0">
+      {stars.map((s) => (
+        <div
+          key={s.id}
+          className="absolute rounded-full bg-white"
+          style={{
+            left: `${s.x}%`,
+            top: `${s.y}%`,
+            width: s.size,
+            height: s.size,
+            opacity: s.opacity,
+          }}
+        />
+      ))}
     </div>
   );
 }

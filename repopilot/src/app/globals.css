@@ -19,28 +19,72 @@ body {
   font-family: var(--font-geist-sans), system-ui, sans-serif;
 }
 
-/* Orbit animation — rotates the whole layer around the centre */
-@keyframes orbit {
-  from { transform: rotate(var(--orbit-start, 0deg)); }
-  to   { transform: rotate(calc(var(--orbit-start, 0deg) + 360deg)); }
+/* ── Solar orbit: rotates each planet layer around the centre ── */
+@keyframes solar-orbit {
+  from { transform: rotate(var(--planet-start, 0deg)); }
+  to   { transform: rotate(calc(var(--planet-start, 0deg) + 360deg)); }
 }
 
-/* Counter-rotation keeps badge text upright */
-@keyframes orbit-counter {
+/* Counter-rotation keeps planet label text upright */
+@keyframes solar-counter {
   from { transform: translateX(-50%) rotate(0deg); }
   to   { transform: translateX(-50%) rotate(-360deg); }
 }
 
-/* Slow spin for the dashed ring */
+/* Sun pulse glow */
+@keyframes sun-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(251,191,36,0.4), 0 0 40px 10px rgba(251,191,36,0.25); }
+  50%       { box-shadow: 0 0 0 18px rgba(251,191,36,0), 0 0 60px 20px rgba(251,191,36,0.15); }
+}
+
+.animate-sun-pulse {
+  animation: sun-pulse 3s ease-in-out infinite;
+}
+
+/* Orbit ring slow spin */
 @keyframes spin-slow {
   from { transform: rotate(0deg); }
   to   { transform: rotate(360deg); }
 }
 
 .animate-spin-slow {
-  animation: spin-slow 40s linear infinite;
+  animation: spin-slow 60s linear infinite;
+}
+
+/* Slow reverse spin for secondary ring */
+.animate-spin-reverse {
+  animation: spin-slow 45s linear infinite reverse;
+}
+
+/* Glass shimmer for feature cards */
+@keyframes glass-shimmer {
+  0%   { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+.glass-card {
+  background: rgba(255,255,255,0.05);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255,255,255,0.12);
+}
+
+.glass-card-light {
+  background: rgba(255,255,255,0.6);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255,255,255,0.8);
 }
 
 /* Hide scrollbar utility */
 .no-scrollbar::-webkit-scrollbar { display: none; }
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* Chatbot bounce */
+@keyframes bot-bounce {
+  0%, 100% { transform: translateY(0); }
+  50%       { transform: translateY(-4px); }
+}
+.animate-bot-bounce {
+  animation: bot-bounce 2s ease-in-out infinite;
+}

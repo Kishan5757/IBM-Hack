@@ -2,11 +2,11 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { CheckCircle2, Copy, Check, Terminal, KeyRound, Container } from "lucide-react";
-import { mockSetupData } from "@/data/mockRepoData";
-
-export default function SetupAssistant({ darkMode }) {
+export default function SetupAssistant({ darkMode, data }) {
   const [activeTab, setActiveTab] = useState("steps");
   const [copiedId, setCopiedId] = useState(null);
+
+  const setup = data || { steps: [], envVars: [], dockerCommand: "", dockerCompose: "" };
 
   const copy = (text, id) => {
     navigator.clipboard.writeText(text);
@@ -16,7 +16,7 @@ export default function SetupAssistant({ darkMode }) {
 
   const tabs = [
     { id: "steps", label: "Setup Steps", icon: CheckCircle2 },
-    { id: "env", label: "Environment Variables", icon: KeyRound },
+    { id: "env", label: "Env Variables", icon: KeyRound },
     { id: "docker", label: "Docker", icon: Container },
   ];
 
@@ -35,7 +35,7 @@ export default function SetupAssistant({ darkMode }) {
             }`}
           >
             <t.icon className="w-3.5 h-3.5" />
-            {t.label}
+            <span className="hidden sm:inline">{t.label}</span>
           </button>
         ))}
       </div>
@@ -43,7 +43,7 @@ export default function SetupAssistant({ darkMode }) {
       <AnimatePresence mode="wait">
         {activeTab === "steps" && (
           <motion.div key="steps" initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 10 }} className="space-y-3">
-            {mockSetupData.steps.map((step) => (
+            {(setup.steps || []).map((step) => (
               <div key={step.id} className={`rounded-xl border p-4 ${darkMode ? "bg-slate-800/60 border-slate-700" : "bg-white border-slate-200"}`}>
                 <div className="flex items-start gap-3">
                   <div className="flex-shrink-0 w-7 h-7 rounded-full bg-indigo-600 text-white text-xs font-bold flex items-center justify-center">{step.id}</div>
@@ -76,7 +76,10 @@ export default function SetupAssistant({ darkMode }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {mockSetupData.envVars.map((ev, i) => (
+                  {(setup.envVars || []).length === 0 && (
+                    <tr><td colSpan={3} className={`px-4 py-6 text-center text-xs ${darkMode ? "text-slate-500" : "text-slate-400"}`}>No environment variables detected.</td></tr>
+                  )}
+                  {(setup.envVars || []).map((ev, i) => (
                     <tr key={ev.key} className={`border-t ${darkMode ? "border-slate-700/50" : "border-slate-100"} ${i % 2 === 0 ? (darkMode ? "bg-slate-800/30" : "bg-white") : (darkMode ? "bg-slate-800/10" : "bg-slate-50")}`}>
                       <td className={`px-4 py-3 font-mono text-xs font-semibold ${darkMode ? "text-indigo-300" : "text-indigo-600"}`}>{ev.key}</td>
                       <td className={`px-4 py-3 font-mono text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{ev.example}</td>
@@ -98,22 +101,22 @@ export default function SetupAssistant({ darkMode }) {
             <div className={`rounded-xl border p-4 ${darkMode ? "bg-slate-800/60 border-slate-700" : "bg-white border-slate-200"}`}>
               <div className="flex items-center justify-between mb-2">
                 <p className={`text-sm font-semibold ${darkMode ? "text-white" : "text-slate-900"}`}>Quick Start Command</p>
-                <button onClick={() => copy(mockSetupData.dockerCommand, "docker-run")} className={`text-xs flex items-center gap-1 px-2 py-1 rounded-lg ${darkMode ? "bg-slate-700 text-slate-300 hover:bg-slate-600" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
+                <button onClick={() => copy(setup.dockerCommand, "docker-run")} className={`text-xs flex items-center gap-1 px-2 py-1 rounded-lg ${darkMode ? "bg-slate-700 text-slate-300 hover:bg-slate-600" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
                   {copiedId === "docker-run" ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
                   Copy
                 </button>
               </div>
-              <pre className={`rounded-lg p-3 font-mono text-xs overflow-x-auto ${darkMode ? "bg-slate-900 text-emerald-400" : "bg-slate-100 text-emerald-700"}`}>{mockSetupData.dockerCommand}</pre>
+              <pre className={`rounded-lg p-3 font-mono text-xs overflow-x-auto ${darkMode ? "bg-slate-900 text-emerald-400" : "bg-slate-100 text-emerald-700"}`}>{setup.dockerCommand}</pre>
             </div>
             <div className={`rounded-xl border p-4 ${darkMode ? "bg-slate-800/60 border-slate-700" : "bg-white border-slate-200"}`}>
               <div className="flex items-center justify-between mb-2">
                 <p className={`text-sm font-semibold ${darkMode ? "text-white" : "text-slate-900"}`}>docker-compose.yml</p>
-                <button onClick={() => copy(mockSetupData.dockerCompose, "docker-compose")} className={`text-xs flex items-center gap-1 px-2 py-1 rounded-lg ${darkMode ? "bg-slate-700 text-slate-300 hover:bg-slate-600" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
+                <button onClick={() => copy(setup.dockerCompose, "docker-compose")} className={`text-xs flex items-center gap-1 px-2 py-1 rounded-lg ${darkMode ? "bg-slate-700 text-slate-300 hover:bg-slate-600" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
                   {copiedId === "docker-compose" ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
                   Copy
                 </button>
               </div>
-              <pre className={`rounded-lg p-3 font-mono text-xs overflow-x-auto ${darkMode ? "bg-slate-900 text-slate-300" : "bg-slate-100 text-slate-800"}`}>{mockSetupData.dockerCompose}</pre>
+              <pre className={`rounded-lg p-3 font-mono text-xs overflow-x-auto ${darkMode ? "bg-slate-900 text-slate-300" : "bg-slate-100 text-slate-800"}`}>{setup.dockerCompose}</pre>
             </div>
           </motion.div>
         )}

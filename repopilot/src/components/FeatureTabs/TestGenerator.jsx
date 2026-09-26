@@ -2,14 +2,14 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import { Copy, Check, RefreshCw, Sparkles } from "lucide-react";
-import { mockTestData } from "@/data/mockRepoData";
-
-export default function TestGenerator({ darkMode }) {
+export default function TestGenerator({ darkMode, data }) {
   const [copied, setCopied] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
 
+  const tests = data || { framework: "", sourceCode: "", generatedTests: "", stats: [] };
+
   const copy = () => {
-    navigator.clipboard.writeText(mockTestData.generatedTests);
+    navigator.clipboard.writeText(tests.generatedTests || "");
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -26,7 +26,9 @@ export default function TestGenerator({ darkMode }) {
         <div className="flex items-center gap-2">
           <Sparkles className="w-4 h-4 text-indigo-500" />
           <span className={`text-sm font-semibold ${darkMode ? "text-white" : "text-slate-900"}`}>AI-Generated Unit Tests</span>
-          <span className={`text-xs px-2 py-0.5 rounded-full ${darkMode ? "bg-emerald-500/20 text-emerald-400" : "bg-emerald-100 text-emerald-700"}`}>Jest · TypeScript</span>
+          <span className={`text-xs px-2 py-0.5 rounded-full ${darkMode ? "bg-emerald-500/20 text-emerald-400" : "bg-emerald-100 text-emerald-700"}`}>
+            {tests.framework || "Jest · TypeScript"}
+          </span>
         </div>
         <div className="flex gap-2">
           <button onClick={regenerate} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${darkMode ? "bg-slate-700 text-slate-300 hover:bg-slate-600" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
@@ -48,7 +50,7 @@ export default function TestGenerator({ darkMode }) {
             <span className="w-2.5 h-2.5 rounded-full bg-rose-500" />
             <span className="w-2.5 h-2.5 rounded-full bg-yellow-500" />
             <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
-            <span className="ml-2">src/utils/auth.ts</span>
+            <span className="ml-2">Source File</span>
           </div>
           <motion.pre
             key={regenerating ? "regen" : "stable"}
@@ -56,7 +58,7 @@ export default function TestGenerator({ darkMode }) {
             animate={{ opacity: 1 }}
             className={`p-4 text-xs font-mono overflow-x-auto overflow-y-auto max-h-96 ${darkMode ? "bg-slate-900 text-slate-300" : "bg-slate-50 text-slate-800"}`}
           >
-            <code>{mockTestData.sourceCode}</code>
+            <code>{tests.sourceCode}</code>
           </motion.pre>
         </div>
 
@@ -64,7 +66,7 @@ export default function TestGenerator({ darkMode }) {
         <div className={`rounded-xl border overflow-hidden ${darkMode ? "border-indigo-700/60" : "border-indigo-200"}`}>
           <div className={`flex items-center gap-2 px-4 py-2 border-b text-xs font-medium ${darkMode ? "bg-indigo-900/40 border-indigo-700/60 text-indigo-300" : "bg-indigo-50 border-indigo-200 text-indigo-600"}`}>
             <Sparkles className="w-3 h-3" />
-            <span>tests/utils/auth.test.ts — AI Generated</span>
+            <span>AI Generated Tests</span>
           </div>
           <motion.pre
             key={regenerating ? "regen-out" : "stable-out"}
@@ -76,7 +78,7 @@ export default function TestGenerator({ darkMode }) {
             {regenerating ? (
               <span className="text-indigo-500 animate-pulse">Generating tests...</span>
             ) : (
-              <code>{mockTestData.generatedTests}</code>
+              <code>{tests.generatedTests}</code>
             )}
           </motion.pre>
         </div>
@@ -84,11 +86,7 @@ export default function TestGenerator({ darkMode }) {
 
       {/* Stats row */}
       <div className="grid grid-cols-3 gap-3">
-        {[
-          { label: "Test Cases", value: "8", color: "indigo" },
-          { label: "Coverage Target", value: "94%", color: "emerald" },
-          { label: "Edge Cases", value: "3", color: "amber" },
-        ].map((stat) => (
+        {(tests.stats || []).map((stat) => (
           <div key={stat.label} className={`rounded-xl border p-3 text-center ${darkMode ? "bg-slate-800/60 border-slate-700" : "bg-white border-slate-200"}`}>
             <p className={`text-xl font-bold text-${stat.color}-500`}>{stat.value}</p>
             <p className={`text-xs mt-0.5 ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{stat.label}</p>
