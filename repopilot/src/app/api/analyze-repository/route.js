@@ -2,17 +2,27 @@
  * POST /api/analyze-repository
  *
  * Accepts a repository analysis payload from the browser,
- * sanitises it, calls Gemini (server-side), and returns
- * structured analysis JSON.
+ * sanitises it, runs it through AIService (Gemini primary → Rule Engine fallback),
+ * and returns structured analysis JSON plus provider attribution.
  *
- * The GEMINI_API_KEY env var is accessed exclusively here.
- * It is NEVER sent to or exposed in the browser.
+ * All LLM credentials (GEMINI_API_KEY) are accessed exclusively server-side.
+ * They are NEVER sent to the browser.
+ *
+ * The Rule Engine fallback is pure Node.js — no API keys, no installs.
+ * AIService.analyzeRepository() NEVER throws; it always returns a result.
+ *
+ * Response shape:
+ *   {
+ *     analysis:     RepositoryAnalysis,
+ *     providerMeta: { provider: "gemini"|"local", fallbackUsed: boolean, model: string },
+ *     isDemo:       false
+ *   }
  */
 
 import { NextResponse } from "next/server";
-import { analyzeRepoWithGemini } from "@/lib/geminiService";
+import { getAIService } from "@/lib/ai";
 
-// ─── File/path patterns that must never be forwarded to Gemini ─────────────
+// ─── File/path patterns that must never be forwarded to any LLM ──────────────
 const EXCLUDED_PATTERNS = [
   /^\.env/i,
   /^\.git\//,
@@ -37,84 +47,95 @@ const BINARY_EXTENSIONS = new Set([
   ".zip", ".tar", ".gz", ".rar",
   ".pdf", ".docx", ".xlsx",
   ".woff", ".woff2", ".ttf", ".eot",
-  ".lock",  // lock files are often massive; we summarise below
+  ".lock",
 ]);
 
-const MAX_FILE_SIZE = 50_000;   // chars per file
-const MAX_TOTAL_SIZE = 400_000; // total chars across all source files
+const MAX_FILE_SIZE = 50_000;    // chars per file
+const MAX_TOTAL_SIZE = 400_000;  // total chars across all source files
 
 export async function POST(request) {
-  // ── 1. Check API key is configured ────────────────────────────────────────
-  if (!process.env.GEMINI_API_KEY) {
-    return NextResponse.json(
-      {
-        error: "AI analysis is not configured. Running RepoPilot in demo mode.",
-        code: "NO_API_KEY",
-      },
-      { status: 503 }
-    );
-  }
-
-  // ── 2. Parse request body ──────────────────────────────────────────────────
+  // ── 1. Parse request body ──────────────────────────────────────────────────
   let body;
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json({ error: "Invalid JSON in request body.", code: "BAD_REQUEST" }, { status: 400 });
-  }
-
-  const { repositoryName, fileTree, sourceFiles, packageManifest, readme, configurationFiles, testFiles } = body;
-
-  if (!repositoryName && !fileTree && !sourceFiles) {
-    return NextResponse.json({ error: "No repository data provided.", code: "BAD_REQUEST" }, { status: 400 });
-  }
-
-  // ── 3. Sanitise payload (strip secrets / oversized content) ───────────────
-  const sanitisedSource = sanitiseFiles(sourceFiles || {});
-  const sanitisedConfig = sanitiseFiles(configurationFiles || {});
-  const sanitisedTests = sanitiseFiles(testFiles || {});
-
-  // Summarise lock files instead of sending raw content
-  const lockFileSummary = extractLockSummary(packageManifest);
-
-  const repositoryPayload = {
-    repositoryName: repositoryName || "unknown-repo",
-    fileTree: (fileTree || []).slice(0, 800),  // cap list length
-    packageManifest: sanitisePkgManifest(packageManifest),
-    lockFileSummary,
-    readme: readme ? readme.slice(0, MAX_FILE_SIZE) : null,
-    sourceFiles: sanitisedSource,
-    configurationFiles: sanitisedConfig,
-    testFiles: sanitisedTests,
-  };
-
-  // ── 4. Call Gemini ─────────────────────────────────────────────────────────
-  let analysis;
-  try {
-    analysis = await analyzeRepoWithGemini(repositoryPayload);
-  } catch (err) {
-    console.error("[analyze-repository] Gemini error:", err);
-
-    const message = err?.message || "Unknown Gemini error";
-
-    if (message.includes("GEMINI_API_KEY")) {
-      return NextResponse.json({ error: message, code: "NO_API_KEY" }, { status: 503 });
-    }
-    if (message.toLowerCase().includes("quota") || message.includes("429")) {
-      return NextResponse.json({ error: "Gemini rate limit reached. Please try again in a moment.", code: "RATE_LIMIT" }, { status: 429 });
-    }
-    if (message.toLowerCase().includes("timeout") || message.toLowerCase().includes("deadline")) {
-      return NextResponse.json({ error: "Analysis timed out. The repository may be too large. Try with a smaller subset.", code: "TIMEOUT" }, { status: 504 });
-    }
-
     return NextResponse.json(
-      { error: `Gemini analysis failed: ${message}`, code: "GEMINI_ERROR" },
-      { status: 502 }
+      { error: "Invalid JSON in request body.", code: "BAD_REQUEST" },
+      { status: 400 }
     );
   }
 
-  // ── 5. Return structured analysis ─────────────────────────────────────────
-  return NextResponse.json({ analysis, isDemo: false });
+  const {
+    repositoryName,
+    fileTree,
+    sourceFiles,
+    packageManifest,
+    readme,
+    configurationFiles,
+    testFiles,
+    metadata,
+  } = body;
+
+  if (!repositoryName && !fileTree && !sourceFiles) {
+    return NextResponse.json(
+      { error: "No repository data provided.", code: "BAD_REQUEST" },
+      { status: 400 }
+    );
+  }
+
+  // ── 2. Sanitise payload (strip secrets / oversized content) ───────────────
+  const sanitisedSource = sanitiseFiles(sourceFiles || {});
+  const sanitisedConfig = sanitiseFiles(configurationFiles || {});
+  const sanitisedTests  = sanitiseFiles(testFiles || {});
+  const lockFileSummary = extractLockSummary(packageManifest);
+
+  const sanitisedMetadata =
+    metadata && typeof metadata === "object"
+      ? {
+          githubSlug:    typeof metadata.githubSlug    === "string" ? metadata.githubSlug : undefined,
+          language:      typeof metadata.language      === "string" ? metadata.language : undefined,
+          description:   typeof metadata.description   === "string" ? metadata.description.slice(0, 500) : undefined,
+          stars:         typeof metadata.stars         === "number" ? metadata.stars : undefined,
+          defaultBranch: typeof metadata.defaultBranch === "string" ? metadata.defaultBranch : undefined,
+        }
+      : {};
+
+  console.log(`[RepoPilot] Repository: ${repositoryName || "unknown"}`);
+  console.log(`[RepoPilot] Files discovered: ${(fileTree || []).length}`);
+  console.log(`[RepoPilot] Source files selected: ${Object.keys(sanitisedSource).length}`);
+  console.log(`[RepoPilot] Context — pkg: ${!!packageManifest}, readme: ${!!readme}, meta: ${JSON.stringify(sanitisedMetadata)}`);
+
+  /** @type {import('@/lib/ai').RepositoryContext} */
+  const repositoryContext = {
+    repositoryName:     repositoryName || "unknown-repo",
+    fileTree:           (fileTree || []).slice(0, 800),
+    packageManifest:    sanitisePkgManifest(packageManifest),
+    lockFileSummary,
+    readme:             readme ? readme.slice(0, MAX_FILE_SIZE) : null,
+    sourceFiles:        sanitisedSource,
+    configurationFiles: sanitisedConfig,
+    testFiles:          sanitisedTests,
+    metadata:           sanitisedMetadata,
+  };
+
+  // ── 3. Run AI analysis (Gemini → Rule Engine fallback, never throws) ───────
+  console.log("[RepoPilot] Starting AI analysis...");
+  const aiService = getAIService();
+  // AIService always resolves — rule engine is the guaranteed fallback
+  const result = await aiService.analyzeRepository(repositoryContext);
+
+  // ── 4. Return structured analysis + provider attribution ───────────────────
+  const { analysis, providerMeta } = result;
+  console.log(
+    `[RepoPilot] Analysis complete — provider: ${providerMeta.provider}, ` +
+      `model: ${providerMeta.model}, fallback: ${providerMeta.fallbackUsed}`
+  );
+
+  return NextResponse.json({
+    analysis,
+    providerMeta,
+    isDemo: false,
+  });
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -131,8 +152,6 @@ function hasBinaryExtension(path) {
 /**
  * Sanitise a map of { filePath: fileContent } objects.
  * Removes secrets, binaries, and oversized files.
- * Trims individual files to MAX_FILE_SIZE chars.
- * Caps total to MAX_TOTAL_SIZE chars.
  */
 function sanitiseFiles(filesMap) {
   const result = {};
@@ -144,7 +163,6 @@ function sanitiseFiles(filesMap) {
 
     const trimmed = content.slice(0, MAX_FILE_SIZE);
     if (totalChars + trimmed.length > MAX_TOTAL_SIZE) {
-      // Include a note that we hit the limit
       result["[truncated]"] = "Repository too large — remaining files omitted.";
       break;
     }
@@ -154,24 +172,25 @@ function sanitiseFiles(filesMap) {
   return result;
 }
 
-/**
- * Strip fields from package.json that might contain tokens/urls
- * and return a safe subset.
- */
+/** Strip fields from package.json that might contain tokens/urls. */
 function sanitisePkgManifest(manifest) {
   if (!manifest || typeof manifest !== "object") return null;
   const safe = {};
-  const allowed = ["name", "version", "description", "scripts", "dependencies", "devDependencies", "peerDependencies", "engines", "main", "type", "keywords"];
+  const allowed = [
+    "name", "version", "description", "scripts",
+    "dependencies", "devDependencies", "peerDependencies",
+    "engines", "main", "type", "keywords",
+  ];
   for (const key of allowed) {
     if (key in manifest) safe[key] = manifest[key];
   }
   return safe;
 }
 
-/** Return a short summary of lock-file data rather than the full content. */
+/** Return a short summary of lock-file data rather than full content. */
 function extractLockSummary(manifest) {
   if (!manifest) return null;
-  const deps = Object.keys(manifest.dependencies || {}).length;
+  const deps    = Object.keys(manifest.dependencies    || {}).length;
   const devDeps = Object.keys(manifest.devDependencies || {}).length;
   if (deps === 0 && devDeps === 0) return null;
   return `${deps} production dependencies, ${devDeps} devDependencies detected in package.json.`;

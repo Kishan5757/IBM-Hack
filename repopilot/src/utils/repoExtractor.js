@@ -98,7 +98,15 @@ async function fetchGitHubPayload(repoName, input) {
   const match = input.match(/github\.com\/([^/]+\/[^/\s?#]+)/);
   const slug = match ? match[1].replace(/\.git$/, "") : input.replace(/^https?:\/\//, "");
 
-  const headers = { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" };
+  // Use GitHub token if available (avoids 60 req/hr unauthenticated limit)
+  const githubToken = process.env.NEXT_PUBLIC_GITHUB_TOKEN || process.env.GITHUB_TOKEN;
+  const headers = {
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    ...(githubToken ? { Authorization: `Bearer ${githubToken}` } : {}),
+  };
+
+  console.log(`[RepoPilot] Fetching GitHub repo: ${slug}`);
 
   // Get repo metadata
   const metaResp = await fetch(`https://api.github.com/repos/${slug}`, { headers });
@@ -115,6 +123,8 @@ async function fetchGitHubPayload(repoName, input) {
 
   const fileTree = allFiles;
 
+  console.log(`[RepoPilot] Files discovered: ${allFiles.length} total`);
+
   // Categorize files
   const sourceFilePaths = allFiles
     .filter((p) => !isExcludedPath(p) && isSourceFile(p))
@@ -128,8 +138,13 @@ async function fetchGitHubPayload(repoName, input) {
     .filter((p) => !isExcludedPath(p) && isTestFile(p))
     .slice(0, MAX_TEST_FILES);
 
+  console.log(`[RepoPilot] Source files selected: ${sourceFilePaths.length}, config: ${configFilePaths.length}, tests: ${testFilePaths.length}`);
+
   // Fetch key file contents
   const packageManifest = await fetchGitHubFile(slug, "package.json", headers, true);
+  // Also try requirements.txt, pyproject.toml, go.mod, Cargo.toml, pom.xml
+  const altManifestPaths = ["requirements.txt", "pyproject.toml", "go.mod", "Cargo.toml", "pom.xml", "build.gradle"];
+
   const readmeContent = await fetchGitHubFile(slug, "README.md", headers) ||
                         await fetchGitHubFile(slug, "readme.md", headers) ||
                         await fetchGitHubFile(slug, "Readme.md", headers);
@@ -150,12 +165,26 @@ async function fetchGitHubPayload(repoName, input) {
     if (content) configurationFiles[p] = content;
   }
 
+  // Also try to fetch alternative manifests if package.json not found
+  if (!packageManifest) {
+    for (const altPath of altManifestPaths) {
+      const content = await fetchGitHubFile(slug, altPath, headers);
+      if (content) {
+        configurationFiles[altPath] = content;
+        console.log(`[RepoPilot] Found alternative manifest: ${altPath}`);
+        break;
+      }
+    }
+  }
+
   // Fetch test files
   const testFiles = {};
   for (const p of testFilePaths) {
     const content = await fetchGitHubFile(slug, p, headers);
     if (content) testFiles[p] = content;
   }
+
+  console.log(`[RepoPilot] Fetched source files: ${Object.keys(sourceFiles).length}, config: ${Object.keys(configurationFiles).length}, tests: ${Object.keys(testFiles).length}`);
 
   return {
     repositoryName: meta.name || repoName,
@@ -227,7 +256,7 @@ async function extractZipPayload(repoName, file) {
   let packageManifest = null;
   try { if (pkgRaw) packageManifest = JSON.parse(pkgRaw); } catch { /* ignore */ }
 
-  const readmeContent = await getContent("README.md") || await getContent("readme.md");
+  const readmeContent = await getContent("README.md") || await getContent("readme.md") || await getContent("Readme.md");
 
   const sourceFiles = {};
   for (const p of sourceFilePaths) {
@@ -242,11 +271,31 @@ async function extractZipPayload(repoName, file) {
     if (c) configurationFiles[p] = c;
   }
 
+  // Also try alternative manifests if no package.json
+  if (!packageManifest) {
+    for (const altPath of ["requirements.txt", "pyproject.toml", "go.mod", "Cargo.toml", "pom.xml"]) {
+      const c = await getContent(altPath);
+      if (c) { configurationFiles[altPath] = c; break; }
+    }
+  }
+
   const testFiles = {};
   for (const p of testFilePaths) {
     const c = await getContent(p);
     if (c) testFiles[p] = c;
   }
+
+  // Detect language from file extensions in the zip
+  const extCounts = {};
+  for (const p of allPaths) {
+    const ext = p.split(".").pop()?.toLowerCase();
+    if (ext && ext.length <= 6) extCounts[ext] = (extCounts[ext] || 0) + 1;
+  }
+  const topExt = Object.entries(extCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
+  const extToLang = { js: "JavaScript", ts: "TypeScript", jsx: "JavaScript", tsx: "TypeScript", py: "Python", rb: "Ruby", java: "Java", go: "Go", rs: "Rust", cs: "C#", php: "PHP" };
+  const detectedLanguage = extToLang[topExt] || null;
+
+  console.log(`[RepoPilot] ZIP extracted — source: ${Object.keys(sourceFiles).length}, config: ${Object.keys(configurationFiles).length}, tests: ${Object.keys(testFiles).length}, lang: ${detectedLanguage}`);
 
   return {
     repositoryName: repoName,
@@ -256,6 +305,13 @@ async function extractZipPayload(repoName, file) {
     sourceFiles,
     configurationFiles,
     testFiles,
+    metadata: {
+      language: detectedLanguage,
+      description: null,
+      githubSlug: null,
+      stars: null,
+      defaultBranch: null,
+    },
   };
 }
 

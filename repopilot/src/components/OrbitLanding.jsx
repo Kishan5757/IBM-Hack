@@ -74,10 +74,30 @@ export default function OrbitLanding({ onAnalyze, darkMode, toggleDark }) {
   const [dragging, setDragging] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [urlError, setUrlError] = useState("");
   const inputRef = useRef(null);
+
+  /** Returns true if the input looks like a valid GitHub URL or owner/repo slug */
+  const isValidGitHubInput = (input) => {
+    if (!input || !input.trim()) return false;
+    const trimmed = input.trim();
+    // Full URL: https://github.com/owner/repo
+    if (/github\.com\/[\w.-]+\/[\w.-]+/.test(trimmed)) return true;
+    // Short slug: owner/repo
+    if (/^[\w.-]+\/[\w.-]+$/.test(trimmed)) return true;
+    return false;
+  };
 
   const startScan = (inputUrl, uploadedFile = null) => {
     const repoUrl = inputUrl || url;
+
+    // For URL inputs (not file uploads), validate format
+    if (!uploadedFile && !isValidGitHubInput(repoUrl)) {
+      setUrlError('Enter a full GitHub URL (e.g. github.com/owner/repo) or owner/repo');
+      return;
+    }
+    setUrlError("");
+
     setScanning(true);
     setProgress(0);
     const start = Date.now();
@@ -241,20 +261,27 @@ export default function OrbitLanding({ onAnalyze, darkMode, toggleDark }) {
                   </div>
 
                   {/* URL input */}
-                  <div
-                    className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 w-full ${
-                      darkMode ? "bg-slate-800 border-slate-600" : "bg-slate-50 border-slate-300"
-                    }`}
-                  >
-                    <Link2 className={`w-3 h-3 flex-shrink-0 ${darkMode ? "text-slate-500" : "text-slate-400"}`} />
-                    <input
-                      type="text"
-                      value={url}
-                      onChange={(e) => setUrl(e.target.value)}
-                      onKeyDown={handleKey}
-                      placeholder="github.com/org/repo"
-                      className={`flex-1 bg-transparent text-xs outline-none placeholder:text-slate-500 ${darkMode ? "text-white" : "text-slate-900"}`}
-                    />
+                  <div className="w-full space-y-1">
+                    <div
+                      className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 w-full ${
+                        urlError
+                          ? "border-rose-500/70 bg-rose-500/10"
+                          : darkMode ? "bg-slate-800 border-slate-600" : "bg-slate-50 border-slate-300"
+                      }`}
+                    >
+                      <Link2 className={`w-3 h-3 flex-shrink-0 ${urlError ? "text-rose-400" : darkMode ? "text-slate-500" : "text-slate-400"}`} />
+                      <input
+                        type="text"
+                        value={url}
+                        onChange={(e) => { setUrl(e.target.value); if (urlError) setUrlError(""); }}
+                        onKeyDown={handleKey}
+                        placeholder="github.com/owner/repo  or  owner/repo"
+                        className={`flex-1 bg-transparent text-xs outline-none placeholder:text-slate-500 ${darkMode ? "text-white" : "text-slate-900"}`}
+                      />
+                    </div>
+                    {urlError && (
+                      <p className="text-[9px] text-rose-400 text-center px-1 leading-tight">{urlError}</p>
+                    )}
                   </div>
 
                   {/* Drop zone mini */}

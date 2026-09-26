@@ -43,7 +43,15 @@ export default function SetupAssistant({ darkMode, data }) {
       <AnimatePresence mode="wait">
         {activeTab === "steps" && (
           <motion.div key="steps" initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 10 }} className="space-y-3">
-            {(setup.steps || []).map((step) => (
+            {(setup.steps || []).length === 0 ? (
+              <div className={`rounded-xl border p-8 text-center ${darkMode ? "bg-slate-900 border-slate-700" : "bg-white border-slate-200"}`}>
+                <Terminal className={`w-8 h-8 mx-auto mb-3 ${darkMode ? "text-slate-600" : "text-slate-300"}`} />
+                <p className={`font-semibold text-sm ${darkMode ? "text-slate-300" : "text-slate-700"}`}>No setup steps detected</p>
+                <p className={`text-xs mt-1 ${darkMode ? "text-slate-500" : "text-slate-400"}`}>
+                  Provide a full GitHub URL (e.g. github.com/owner/repo) for accurate setup instructions.
+                </p>
+              </div>
+            ) : (setup.steps || []).map((step) => (
               <div key={step.id} className={`rounded-xl border p-4 ${darkMode ? "bg-slate-800/60 border-slate-700" : "bg-white border-slate-200"}`}>
                 <div className="flex items-start gap-3">
                   <div className="flex-shrink-0 w-7 h-7 rounded-full bg-indigo-600 text-white text-xs font-bold flex items-center justify-center">{step.id}</div>

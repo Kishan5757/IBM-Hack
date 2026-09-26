@@ -1,5 +1,5 @@
 "use client";
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   GitBranch,
@@ -23,6 +23,8 @@ import {
   CheckCircle2,
   Circle,
   Sparkles,
+  Cpu,
+  WifiOff,
 } from "lucide-react";
 import { generateDynamicRepoData } from "@/data/repoIntelligence";
 import { buildRepositoryPayload } from "@/utils/repoExtractor";
@@ -58,11 +60,11 @@ const ACTIVE_MAP = {
 
 // Analysis progress stages
 const ANALYSIS_STAGES = [
-  { id: "load",    label: "Repository loaded" },
-  { id: "tree",    label: "Reading project structure" },
-  { id: "deps",    label: "Inspecting dependencies" },
-  { id: "analyze", label: "Analyzing code" },
-  { id: "recs",    label: "Generating recommendations" },
+  { id: "load",    label: "Loading repository..." },
+  { id: "tree",    label: "Fetching repository tree & source files..." },
+  { id: "deps",    label: "Reading source files & dependencies..." },
+  { id: "analyze", label: "Analyzing repository with Gemini 3.8 Flash..." },
+  { id: "recs",    label: "Generating results..." },
 ];
 
 export default function Dashboard({ onBack, onReset, darkMode, toggleDark, repoName, uploadedFile, initialTab }) {
@@ -72,9 +74,14 @@ export default function Dashboard({ onBack, onReset, darkMode, toggleDark, repoN
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisData, setAnalysisData] = useState(null);
   const [analysisError, setAnalysisError] = useState(null);
+  const [analysisErrorCode, setAnalysisErrorCode] = useState(null);
   const [isDemo, setIsDemo] = useState(false);
-  const [analysisStage, setAnalysisStage] = useState(0); // 0-4 index into ANALYSIS_STAGES
+  const [analysisStage, setAnalysisStage] = useState(0);
   const [analysisDone, setAnalysisDone] = useState(false);
+  const [retryCountdown, setRetryCountdown] = useState(0);
+  const retryTimerRef = useRef(null);
+  // Provider attribution — populated after a successful analysis
+  const [providerMeta, setProviderMeta] = useState(null); // { provider: "gemini"|"local", fallbackUsed, model }
 
   // Fallback: mock data from intelligence layer
   const mockData = useMemo(() => generateDynamicRepoData(repoName || ""), [repoName]);
@@ -90,9 +97,36 @@ export default function Dashboard({ onBack, onReset, darkMode, toggleDark, repoN
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Start a countdown and auto-retry after `seconds`
+  const scheduleRetry = useCallback((seconds) => {
+    setRetryCountdown(seconds);
+    if (retryTimerRef.current) clearInterval(retryTimerRef.current);
+    retryTimerRef.current = setInterval(() => {
+      setRetryCountdown((prev) => {
+        if (prev <= 1) {
+          clearInterval(retryTimerRef.current);
+          retryTimerRef.current = null;
+          // Auto-retry
+          analysisTriggeredRef.current = false;
+          runAnalysis();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Clean up timer on unmount
+  useEffect(() => () => { if (retryTimerRef.current) clearInterval(retryTimerRef.current); }, []);
+
   async function runAnalysis() {
     setIsAnalyzing(true);
     setAnalysisError(null);
+    setAnalysisErrorCode(null);
+    setRetryCountdown(0);
+    setProviderMeta(null);
+    if (retryTimerRef.current) { clearInterval(retryTimerRef.current); retryTimerRef.current = null; }
     setAnalysisStage(0);
     setAnalysisDone(false);
 
@@ -104,14 +138,14 @@ export default function Dashboard({ onBack, onReset, darkMode, toggleDark, repoN
       // Stage 1 → 2: send to server
       setAnalysisStage(2);
 
-      // Stage 2 → 3: wait for Gemini
+      // Stage 2 → 3: AI analysis (Gemini or rule engine fallback)
       setAnalysisStage(3);
 
       const response = await fetch("/api/analyze-repository", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(120_000), // 2-minute timeout
+        signal: AbortSignal.timeout(120_000), // 2 min — rule engine is instant
       });
 
       const json = await response.json();
@@ -120,27 +154,17 @@ export default function Dashboard({ onBack, onReset, darkMode, toggleDark, repoN
       setAnalysisStage(4);
 
       if (!response.ok) {
-        const code = json?.code;
-        if (code === "NO_API_KEY") {
-          // Graceful demo mode
-          setIsDemo(true);
-          setAnalysisData(null);
-        } else {
-          throw new Error(json?.error || `Server error ${response.status}`);
-        }
+        // The only non-200 we can get now is a bad request or a JSON parse error
+        throw new Error(json?.error || `Server error ${response.status}`);
       } else {
         setAnalysisData(json.analysis);
         setIsDemo(json.isDemo === true);
+        if (json.providerMeta) setProviderMeta(json.providerMeta);
       }
     } catch (err) {
       console.error("[Dashboard] Analysis error:", err);
       const message = err?.message || "Unknown error";
-      if (message.includes("NO_API_KEY") || message.includes("not configured")) {
-        setIsDemo(true);
-        setAnalysisData(null);
-      } else {
-        setAnalysisError(message);
-      }
+      setAnalysisError(message);
     } finally {
       setAnalysisStage(4);
       setAnalysisDone(true);
@@ -149,8 +173,10 @@ export default function Dashboard({ onBack, onReset, darkMode, toggleDark, repoN
   }
 
   function retryAnalysis() {
+    if (retryCountdown > 0) return; // still counting down
+    if (retryTimerRef.current) { clearInterval(retryTimerRef.current); retryTimerRef.current = null; }
+    setRetryCountdown(0);
     analysisTriggeredRef.current = false;
-    analysisTriggeredRef.current = true;
     runAnalysis();
   }
 
@@ -272,18 +298,14 @@ export default function Dashboard({ onBack, onReset, darkMode, toggleDark, repoN
             </div>
 
             <div className="ml-auto flex items-center gap-2">
-              {/* AI status badge */}
+              {/* AI provider status badge */}
               {analysisDone && !isAnalyzing && (
-                <div className={`hidden sm:flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border font-medium ${
-                  isDemo
-                    ? (darkMode ? "bg-amber-500/10 border-amber-500/30 text-amber-400" : "bg-amber-50 border-amber-200 text-amber-700")
-                    : analysisError
-                    ? (darkMode ? "bg-rose-500/10 border-rose-500/30 text-rose-400" : "bg-rose-50 border-rose-200 text-rose-700")
-                    : (darkMode ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" : "bg-emerald-50 border-emerald-200 text-emerald-700")
-                }`}>
-                  <Sparkles className="w-3 h-3" />
-                  {isDemo ? "Demo Mode" : analysisError ? "AI Error" : "AI Analysis"}
-                </div>
+                <ProviderBadge
+                  isDemo={isDemo}
+                  analysisError={analysisError}
+                  providerMeta={providerMeta}
+                  darkMode={darkMode}
+                />
               )}
 
               {onReset && (
@@ -349,7 +371,7 @@ export default function Dashboard({ onBack, onReset, darkMode, toggleDark, repoN
                 <Loader2 className="w-5 h-5 text-indigo-500 animate-spin" />
                 <div>
                   <h3 className={`font-bold text-sm ${darkMode ? "text-white" : "text-slate-900"}`}>Analyzing your repository…</h3>
-                  <p className={`text-xs mt-0.5 ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Gemini is reading the actual codebase contents</p>
+                  <p className={`text-xs mt-0.5 ${darkMode ? "text-slate-400" : "text-slate-500"}`}>AI is reading the actual codebase contents · automatic fallback enabled</p>
                 </div>
               </div>
               <div className="space-y-2">
@@ -394,8 +416,8 @@ export default function Dashboard({ onBack, onReset, darkMode, toggleDark, repoN
           </motion.div>
         )}
 
-        {/* ── Error Banner ── */}
-        {!isAnalyzing && analysisError && !isDemo && (
+        {/* ── Error Banner (only shown for unexpected request errors — should be rare) ── */}
+        {!isAnalyzing && analysisError && (
           <motion.div
             initial={{ opacity: 0, y: -8 }}
             animate={{ opacity: 1, y: 0 }}
@@ -411,23 +433,33 @@ export default function Dashboard({ onBack, onReset, darkMode, toggleDark, repoN
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium flex-shrink-0 transition-all ${darkMode ? "bg-rose-500/20 text-rose-400 hover:bg-rose-500/30" : "bg-rose-100 text-rose-700 hover:bg-rose-200"}`}
             >
               <RefreshCw className="w-3.5 h-3.5" />
-              Retry Analysis
+              Retry
             </button>
           </motion.div>
         )}
 
-        {/* ── Success Banner (briefly shown after analysis) ── */}
-        {!isAnalyzing && analysisDone && !analysisError && !isDemo && analysisData && (
+        {/* ── Success Banner ── */}
+        {!isAnalyzing && analysisDone && !analysisError && analysisData && (
           <motion.div
             initial={{ opacity: 0, y: -8 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0 }}
-            className={`mb-5 rounded-xl border p-3 flex items-center gap-3 ${darkMode ? "bg-emerald-500/8 border-emerald-500/25" : "bg-emerald-50 border-emerald-200"}`}
+            className={`mb-5 rounded-xl border p-3 flex items-center gap-3 ${
+              providerMeta?.provider === "local"
+                ? darkMode ? "bg-indigo-500/8 border-indigo-500/25" : "bg-indigo-50 border-indigo-200"
+                : darkMode ? "bg-emerald-500/8 border-emerald-500/25" : "bg-emerald-50 border-emerald-200"
+            }`}
           >
-            <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0" />
+            {providerMeta?.provider === "local"
+              ? <Cpu className="w-4 h-4 text-indigo-500 flex-shrink-0" />
+              : <CheckCircle2 className="w-4 h-4 text-emerald-500 flex-shrink-0" />
+            }
             <div className="flex-1">
-              <p className={`text-xs font-medium ${darkMode ? "text-emerald-400" : "text-emerald-700"}`}>
-                Repository analysis complete · Results powered by Gemini 2.5 Flash
+              <p className={`text-xs font-medium ${providerMeta?.provider === "local" ? (darkMode ? "text-indigo-400" : "text-indigo-700") : (darkMode ? "text-emerald-400" : "text-emerald-700")}`}>
+                {providerMeta?.provider === "local"
+                  ? "Gemini unavailable · Offline analysis complete (rule-based engine)"
+                  : `Analysis complete · Powered by ${providerMeta?.model || "Gemini 2.5 Flash"}`
+                }
                 {analysisData.overview?.healthScore != null && (
                   <span className="ml-2 font-bold">· Health score: {analysisData.overview.healthScore}/100</span>
                 )}
@@ -449,7 +481,7 @@ export default function Dashboard({ onBack, onReset, darkMode, toggleDark, repoN
           <div>
             <h2 className={`font-bold text-base ${darkMode ? "text-white" : "text-slate-900"}`}>{tab.label}</h2>
             <p className={`text-xs ${darkMode ? "text-slate-500" : "text-slate-400"}`}>
-              {isDemo ? "Demo data" : isAnalyzing ? "Analyzing…" : "AI-powered"} · Repo: {meta.name || "my-awesome-app"}
+              {isDemo ? "Demo data" : isAnalyzing ? "Analyzing…" : providerMeta ? (providerMeta.provider === "local" ? "Offline engine" : `Gemini (${providerMeta.model})`) : "AI-powered"} · Repo: {meta.name || "my-awesome-app"}
             </p>
           </div>
         </motion.div>
@@ -476,6 +508,50 @@ function MetaChip({ icon: Icon, label, darkMode }) {
     <div className={`flex items-center gap-1 ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
       <Icon className="w-3 h-3" />
       <span>{label}</span>
+    </div>
+  );
+}
+
+/**
+ * ProviderBadge — header chip showing which AI model produced the analysis.
+ *
+ * States:
+ *   • Gemini success  → green  "Powered by gemini-2.5-flash"
+ *   • Rule engine     → indigo "Offline Analysis"
+ *   • Error           → rose   "AI Error"
+ */
+function ProviderBadge({ isDemo, analysisError, providerMeta, darkMode }) {
+  if (analysisError) {
+    return (
+      <div className={`hidden sm:flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border font-medium ${
+        darkMode ? "bg-rose-500/10 border-rose-500/30 text-rose-400" : "bg-rose-50 border-rose-200 text-rose-700"
+      }`}>
+        <AlertTriangle className="w-3 h-3" />
+        Analysis Error
+      </div>
+    );
+  }
+
+  if (!providerMeta) return null;
+
+  if (providerMeta.provider === "local") {
+    return (
+      <div className={`hidden sm:flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border font-medium ${
+        darkMode ? "bg-indigo-500/10 border-indigo-500/30 text-indigo-400" : "bg-indigo-50 border-indigo-200 text-indigo-700"
+      }`} title="Gemini unavailable — analysis performed by the built-in rule engine">
+        <Cpu className="w-3 h-3" />
+        Offline Analysis
+      </div>
+    );
+  }
+
+  // Gemini success
+  return (
+    <div className={`hidden sm:flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border font-medium ${
+      darkMode ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" : "bg-emerald-50 border-emerald-200 text-emerald-700"
+    }`} title={`Analysis by ${providerMeta.model}`}>
+      <Sparkles className="w-3 h-3" />
+      Powered by {providerMeta.model}
     </div>
   );
 }
