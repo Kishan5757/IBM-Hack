@@ -78,17 +78,37 @@ export async function buildRepositoryPayload(repoInput, file) {
     }
   }
 
-  // GitHub URL → try public GitHub API to get some real data
+  // GitHub URL → try authenticated API first, then raw fallback
   if (repoInput && (repoInput.includes("github.com") || repoInput.match(/^[\w-]+\/[\w-]+$/))) {
+    // Parse the slug upfront so the raw fallback can use it too
+    const match = repoInput.match(/github\.com\/([^/]+\/[^/\s?#]+)/);
+    const slug = match
+      ? match[1].replace(/\.git$/, "")
+      : repoInput.replace(/^https?:\/\//, "").replace(/^github\.com\//, "");
+
     try {
       return await fetchGitHubPayload(repositoryName, repoInput);
     } catch (e) {
-      console.warn("[repoExtractor] GitHub API fetch failed, using minimal payload:", e);
+      console.warn("[repoExtractor] GitHub API fetch failed:", e.message);
+      // Try raw content fallback before giving up
+      if (slug && slug.includes("/")) {
+        try {
+          console.log("[repoExtractor] Trying raw content fallback for:", slug);
+          return await fetchRawFallbackPayload(repositoryName, slug);
+        } catch (e2) {
+          console.warn("[repoExtractor] Raw fallback also failed:", e2.message);
+        }
+      }
+    }
+
+    // Still return something useful — at least keep the slug in metadata
+    if (slug && slug.includes("/")) {
+      return buildMinimalPayload(repositoryName, slug);
     }
   }
 
   // Minimal fallback: name only
-  return buildMinimalPayload(repositoryName);
+  return buildMinimalPayload(repositoryName, null);
 }
 
 // ─── GitHub API extraction ────────────────────────────────────────────────────
@@ -336,9 +356,130 @@ function detectZipPrefix(entries) {
   return "";
 }
 
+// ─── Raw-content fallback (no auth required) ─────────────────────────────────
+//
+// raw.githubusercontent.com serves file content without authentication.
+// We can fetch well-known files (package.json, README.md, requirements.txt …)
+// directly even when the GitHub API is rate-limited.
+
+async function fetchRawFallbackPayload(repoName, slug) {
+  // Detect the default branch by racing requests to main/master/develop
+  const branches = ["main", "master", "develop"];
+  let branch = "main";
+
+  const branchProbes = await Promise.all(
+    branches.map((b) =>
+      fetchRaw(slug, b, "README.md").then((content) => ({ b, content }))
+    )
+  );
+  for (const { b, content } of branchProbes) {
+    if (content !== null) { branch = b; break; }
+  }
+
+  console.log(`[repoExtractor] Raw fallback — using branch: ${branch}`);
+
+  const rawFetch = (path) => fetchRaw(slug, branch, path);
+
+  // Fetch all well-known files in parallel
+  const [
+    readmeMain, readmeLower, readmeCap,
+    pkgRaw,
+    requirementsTxt,
+    pyprojectToml,
+    goMod,
+    cargoToml,
+    pomXml,
+  ] = await Promise.all([
+    rawFetch("README.md"),
+    rawFetch("readme.md"),
+    rawFetch("Readme.md"),
+    rawFetch("package.json"),
+    rawFetch("requirements.txt"),
+    rawFetch("pyproject.toml"),
+    rawFetch("go.mod"),
+    rawFetch("Cargo.toml"),
+    rawFetch("pom.xml"),
+  ]);
+
+  const readmeContent = readmeMain || readmeLower || readmeCap;
+
+  let packageManifest = null;
+  try { if (pkgRaw) packageManifest = JSON.parse(pkgRaw); } catch { /* ignore */ }
+
+  const configurationFiles = {};
+  if (requirementsTxt) configurationFiles["requirements.txt"] = requirementsTxt;
+  if (pyprojectToml)  configurationFiles["pyproject.toml"]   = pyprojectToml;
+  if (goMod)          configurationFiles["go.mod"]           = goMod;
+  if (cargoToml)      configurationFiles["Cargo.toml"]       = cargoToml;
+  if (pomXml)         configurationFiles["pom.xml"]          = pomXml;
+
+  // Fetch a handful of common source entry-points
+  const commonSources = [
+    "src/index.ts", "src/index.tsx", "src/index.js",
+    "src/app/page.tsx", "src/app/page.jsx",
+    "src/main.ts", "src/main.tsx", "src/main.js",
+    "main.py", "app.py", "manage.py",
+    "main.go", "cmd/main.go",
+    "src/main.rs", "main.rs",
+  ];
+  const sourceFiles = {};
+  const sourceFetches = await Promise.all(commonSources.map((p) => rawFetch(p).then((c) => [p, c])));
+  for (const [path, content] of sourceFetches) {
+    if (content) sourceFiles[path] = content.slice(0, MAX_FILE_CHARS);
+  }
+
+  // Try to fetch .env.example
+  const envExample = await rawFetch(".env.example") || await rawFetch(".env.sample");
+  if (envExample) configurationFiles[".env.example"] = envExample;
+
+  // Detect language from files we found
+  const allFoundPaths = [
+    ...Object.keys(sourceFiles),
+    ...Object.keys(configurationFiles),
+    readmeContent ? "README.md" : null,
+  ].filter(Boolean);
+
+  console.log(`[repoExtractor] Raw fallback fetched — readme:${!!readmeContent}, pkg:${!!packageManifest}, sources:${Object.keys(sourceFiles).length}, configs:${Object.keys(configurationFiles).length}`);
+
+  return {
+    repositoryName: repoName,
+    fileTree: allFoundPaths,
+    packageManifest,
+    readme: readmeContent,
+    sourceFiles,
+    configurationFiles,
+    testFiles: {},
+    metadata: {
+      githubSlug: slug,
+      language: null,   // GitHub API unavailable — will be inferred by rule engine
+      description: null,
+      stars: null,
+      defaultBranch: branch,
+    },
+  };
+}
+
+/**
+ * Fetch a single file from raw.githubusercontent.com (no auth).
+ * Returns the text content or null on any failure.
+ */
+async function fetchRaw(slug, branch, path) {
+  try {
+    const url = `https://raw.githubusercontent.com/${slug}/${branch}/${path}`;
+    const resp = await fetch(url);
+    if (!resp.ok) return null;
+    const text = await resp.text();
+    // Reject if we got an HTML error page (GitHub 404 pages are HTML)
+    if (text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) return null;
+    return text.slice(0, MAX_FILE_CHARS);
+  } catch {
+    return null;
+  }
+}
+
 // ─── Minimal fallback payload ─────────────────────────────────────────────────
 
-function buildMinimalPayload(repoName) {
+function buildMinimalPayload(repoName, slug = null) {
   return {
     repositoryName: repoName,
     fileTree: [],
@@ -347,6 +488,14 @@ function buildMinimalPayload(repoName) {
     sourceFiles: {},
     configurationFiles: {},
     testFiles: {},
+    // Always preserve slug so rule engine can generate correct URLs/badges
+    metadata: slug ? {
+      githubSlug: slug,
+      language: null,
+      description: null,
+      stars: null,
+      defaultBranch: null,
+    } : {},
   };
 }
 
