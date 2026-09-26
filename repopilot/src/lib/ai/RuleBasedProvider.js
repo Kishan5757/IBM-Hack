@@ -143,7 +143,7 @@ export class RuleBasedProvider {
     const testFramework = this._detectTestFramework(pkg, fileTree);
 
     // ── 2. Dependency analysis ───────────────────────────────────────────────
-    const { depNodes, depAlerts, depOutdated } = this._analyzeDependencies(pkg, repositoryName);
+    const { depNodes, depAlerts, depOutdated } = this._analyzeDependencies(pkg, repositoryName, configurationFiles);
 
     // ── 3. Environment variables ─────────────────────────────────────────────
     const envVars = this._extractEnvVars(sourceFiles, configurationFiles);
@@ -172,7 +172,7 @@ export class RuleBasedProvider {
     const healthScore = Math.max(10, Math.min(100, 100 - criticalIssues * 15 - warnings * 5));
 
     // ── 9. Action plan ───────────────────────────────────────────────────────
-    const actionPlan = this._buildActionPlan(criticalIssues, warnings, depOutdated, testFiles, readme, envVars, pkg, fileTree);
+    const actionPlan = this._buildActionPlan(criticalIssues, warnings, depOutdated, testFiles, readme, envVars, pkg, fileTree, language);
 
     // ── 10. Overview summary ─────────────────────────────────────────────────
     const summary = this._buildSummary(repositoryName, metadata, language, framework, pkg, fileTree, readme, stack);
@@ -388,7 +388,22 @@ export class RuleBasedProvider {
         if (rule.test(pkg)) return rule.name;
       }
     }
-    // Infer from file patterns
+    // Python test frameworks — infer from file tree patterns
+    // Matches: test_*.py, *_test.py, tests.py, test.py
+    if (fileTree.some((f) => /(?:^|\/)(test_[^/]+|[^/]+_test|tests?)\.(py)$/.test(f))) {
+      if (fileTree.some((f) => f.includes("conftest.py") || f.includes("pytest"))) return "pytest";
+      return "pytest (inferred)";
+    }
+    // Go tests
+    if (fileTree.some((f) => /_test\.go$/.test(f))) return "Go testing";
+    // Rust tests
+    if (fileTree.some((f) => /\.rs$/.test(f))) {
+      // Rust tests are usually inline; if there are .rs files, testing framework is built-in
+      return "Rust cargo test";
+    }
+    // Java tests
+    if (fileTree.some((f) => /Test\.java$|Tests\.java$/.test(f))) return "JUnit";
+    // Infer from JS/TS file patterns
     const testExts = fileTree.filter((f) => f.includes(".test.") || f.includes(".spec."));
     if (testExts.length > 0) {
       if (fileTree.some((f) => f.includes("cypress"))) return "Cypress";
@@ -400,12 +415,16 @@ export class RuleBasedProvider {
 
   // ─── Dependency analysis ───────────────────────────────────────────────────
 
-  _analyzeDependencies(pkg, repoName) {
+  _analyzeDependencies(pkg, repoName, configFiles = {}) {
     const depNodes = [{ id: "root", label: repoName, type: "root", health: "ok" }];
     const depAlerts = [];
     const depOutdated = [];
 
-    if (!pkg) return { depNodes, depAlerts, depOutdated };
+    // ── Non-JS: parse requirements.txt / go.mod / Cargo.toml / pom.xml ───────
+    if (!pkg) {
+      this._parseNonJsDeps(configFiles, depNodes);
+      return { depNodes, depAlerts, depOutdated };
+    }
 
     const prod = pkg.dependencies || {};
     const dev = pkg.devDependencies || {};
@@ -445,6 +464,76 @@ export class RuleBasedProvider {
     }
 
     return { depNodes, depAlerts, depOutdated };
+  }
+
+  /**
+   * Parse dependency lists from non-JS manifest files and push nodes.
+   * Handles: requirements.txt, go.mod, Cargo.toml, pom.xml / build.gradle.
+   */
+  _parseNonJsDeps(configFiles, depNodes) {
+    // requirements.txt — "package==1.2.3" or "package>=1.0"
+    const reqTxt = configFiles["requirements.txt"] || configFiles["requirements/base.txt"] || "";
+    if (reqTxt) {
+      for (const line of reqTxt.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("-")) continue;
+        const m = trimmed.match(/^([A-Za-z0-9_.-]+)\s*([>=<!~^].+)?$/);
+        if (m) {
+          const name = m[1];
+          const version = (m[2] || "").trim() || "*";
+          depNodes.push({ id: name, label: `${name}@${version}`, type: "dep", health: "ok" });
+        }
+      }
+    }
+
+    // go.mod — "require (\n\t github.com/pkg/name v1.2.3\n)"
+    const goMod = configFiles["go.mod"] || "";
+    if (goMod) {
+      const requireBlock = goMod.match(/require\s*\(([^)]+)\)/s);
+      const lines = requireBlock ? requireBlock[1].split("\n") : goMod.split("\n");
+      for (const line of lines) {
+        const m = line.trim().match(/^([\w./-]+)\s+(v[\d.]+)/);
+        if (m) {
+          const name = m[1].split("/").pop(); // use just the last path segment as label
+          depNodes.push({ id: m[1], label: `${name}@${m[2]}`, type: "dep", health: "ok" });
+        }
+      }
+    }
+
+    // Cargo.toml — [dependencies]\n pkg = "1.0"  or  pkg = { version = "1.0" }
+    const cargoToml = configFiles["Cargo.toml"] || "";
+    if (cargoToml) {
+      const depSection = cargoToml.match(/\[dependencies\]([\s\S]*?)(?=\[|$)/);
+      if (depSection) {
+        for (const line of depSection[1].split("\n")) {
+          const m = line.trim().match(/^([a-zA-Z0-9_-]+)\s*=\s*["']?([^"'\s{]+)/);
+          if (m && !line.trim().startsWith("#")) {
+            depNodes.push({ id: m[1], label: `${m[1]}@${m[2]}`, type: "dep", health: "ok" });
+          }
+        }
+      }
+    }
+
+    // pom.xml — <artifactId> + <version>
+    const pomXml = configFiles["pom.xml"] || "";
+    if (pomXml) {
+      const artifactRe = /<artifactId>([^<]+)<\/artifactId>/g;
+      const versionRe = /<version>([^<]+)<\/version>/g;
+      const artifacts = [];
+      const versions = [];
+      let m;
+      while ((m = artifactRe.exec(pomXml)) !== null) artifacts.push(m[1]);
+      while ((m = versionRe.exec(pomXml)) !== null) versions.push(m[1]);
+      // Skip first artifact/version (they belong to the project itself)
+      for (let i = 1; i < artifacts.length; i++) {
+        depNodes.push({
+          id: artifacts[i],
+          label: `${artifacts[i]}@${versions[i] || "*"}`,
+          type: "dep",
+          health: "ok",
+        });
+      }
+    }
   }
 
   // ─── Environment variable extraction ──────────────────────────────────────
@@ -511,23 +600,36 @@ export class RuleBasedProvider {
 
     if (!pkg) {
       // Non-JS languages
-      const lang = language.toLowerCase();
+      const lang = (language || "").toLowerCase();
+      const hasEnvExample = Object.keys(configFiles).some((f) => f.includes(".env.example") || f.includes(".env.sample"));
       if (lang === "python") {
         steps.push({ id: id++, title: "Create virtual environment", command: "python -m venv venv && source venv/bin/activate", description: "Isolate project dependencies." });
         steps.push({ id: id++, title: "Install dependencies", command: "pip install -r requirements.txt", description: "Install required Python packages." });
-        const hasEnvExample = Object.keys(configFiles).some((f) => f.includes(".env.example") || f.includes(".env.sample"));
         if (hasEnvExample) steps.push({ id: id++, title: "Configure environment", command: "cp .env.example .env", description: "Set up environment variables." });
         steps.push({ id: id++, title: "Run the application", command: "python main.py", description: "Start the application." });
       } else if (lang === "go") {
         steps.push({ id: id++, title: "Install dependencies", command: "go mod tidy", description: "Download Go module dependencies." });
+        if (hasEnvExample) steps.push({ id: id++, title: "Configure environment", command: "cp .env.example .env", description: "Set up environment variables." });
         steps.push({ id: id++, title: "Build the project", command: "go build ./...", description: "Compile the project." });
         steps.push({ id: id++, title: "Run the application", command: "go run .", description: "Start the application." });
       } else if (lang === "rust") {
         steps.push({ id: id++, title: "Build the project", command: "cargo build --release", description: "Compile with Cargo." });
         steps.push({ id: id++, title: "Run the application", command: "cargo run", description: "Start the application." });
+      } else if (lang === "java" || lang === "kotlin") {
+        steps.push({ id: id++, title: "Build the project", command: "mvn clean install", description: "Build with Maven." });
+        steps.push({ id: id++, title: "Run the application", command: "mvn spring-boot:run", description: "Start the Spring Boot application." });
+      } else if (lang === "dart") {
+        steps.push({ id: id++, title: "Install Flutter", command: "flutter pub get", description: "Install Flutter dependencies." });
+        steps.push({ id: id++, title: "Run the application", command: "flutter run", description: "Launch on a connected device or emulator." });
+      } else if (lang === "ruby") {
+        steps.push({ id: id++, title: "Install dependencies", command: "bundle install", description: "Install Ruby gems." });
+        if (hasEnvExample) steps.push({ id: id++, title: "Configure environment", command: "cp .env.example .env", description: "Set up environment variables." });
+        steps.push({ id: id++, title: "Run the application", command: "rails server", description: "Start the Rails server." });
       } else {
-        steps.push({ id: id++, title: "Install dependencies", command: "# See project documentation for install instructions", description: "Follow the project README." });
-        steps.push({ id: id++, title: "Run the application", command: "# See project documentation", description: "Start the application." });
+        // Truly unknown — give generic helpful steps
+        steps.push({ id: id++, title: "Review project documentation", command: "cat README.md", description: "Check the README for language-specific setup instructions." });
+        if (hasEnvExample) steps.push({ id: id++, title: "Configure environment", command: "cp .env.example .env", description: "Set up environment variables." });
+        steps.push({ id: id++, title: "Build and run", command: "# Follow the project README for build and run instructions", description: "Execute the build and run steps as documented." });
       }
       return steps;
     }
@@ -701,7 +803,11 @@ export class RuleBasedProvider {
   // ─── README generation ────────────────────────────────────────────────────
 
   _generateReadme(name, metadata, pkg, language, framework, stack, steps, envVars, fileTree, existingReadme) {
-    const desc = metadata?.description || (existingReadme ? this._extractDescription(existingReadme) : null) || `A ${framework} project.`;
+    // Build description — avoid "Unknown" leaking into text
+    const knownFw = framework && framework !== "Unknown" ? framework : null;
+    const knownLang = language && language !== "Unknown" ? language : null;
+    const fallbackDesc = knownFw ? `A ${knownFw} project.` : knownLang ? `A ${knownLang} project.` : "A software project.";
+    const desc = metadata?.description || (existingReadme ? this._extractDescription(existingReadme) : null) || fallbackDesc;
     const ghSlug = metadata?.githubSlug;
     const version = pkg?.version || null;
     const hasTests = fileTree.some((f) => f.includes(".test.") || f.includes(".spec.") || f.includes("__tests__"));
@@ -1146,26 +1252,48 @@ ${fnTests}
 
   // ─── Action plan ──────────────────────────────────────────────────────────
 
-  _buildActionPlan(criticalIssues, warnings, depOutdated, testFiles, readme, envVars, pkg, fileTree) {
+  _buildActionPlan(criticalIssues, warnings, depOutdated, testFiles, readme, envVars, pkg, fileTree, language) {
     const plan = [];
     const all = pkg ? { ...pkg.dependencies, ...pkg.devDependencies } : {};
+    const lang = (language || "").toLowerCase();
+    const isJs = !lang || lang === "javascript" || lang === "typescript";
+    const isPython = lang === "python";
+    const isGo = lang === "go";
+    const isRust = lang === "rust";
+    const isJava = lang === "java" || lang === "kotlin";
 
     if (criticalIssues > 0) {
       plan.push({
         priority: "high",
         title: "Resolve security vulnerabilities",
         reason: `${criticalIssues} dependency with known security advisories was detected.`,
-        recommendation: "Run `npm audit fix` to automatically fix resolvable issues. Review any remaining advisories manually and upgrade packages to their patched versions.",
+        recommendation: isJs
+          ? "Run `npm audit fix` to automatically fix resolvable issues. Review any remaining advisories manually and upgrade packages to their patched versions."
+          : isPython
+          ? "Run `pip audit` or `safety check` to review vulnerable packages. Update to patched versions in requirements.txt."
+          : "Review dependency advisories and upgrade to patched versions.",
       });
     }
 
     if (Object.keys(testFiles).length === 0) {
-      const suggestedFramework = all.vitest ? "Vitest" : all.jest ? "Jest" : "Vitest";
+      let testRec;
+      if (isPython) {
+        testRec = "Set up pytest (`pip install pytest`) and write unit tests for all core logic. Aim for at least 60% coverage.";
+      } else if (isGo) {
+        testRec = "Add `_test.go` files alongside your packages and run `go test ./...` to validate them.";
+      } else if (isRust) {
+        testRec = "Add `#[cfg(test)]` modules with unit tests in your source files and run `cargo test`.";
+      } else if (isJava) {
+        testRec = "Add JUnit 5 tests under `src/test/java` and run `mvn test` to validate them.";
+      } else {
+        const suggestedFramework = all.vitest ? "Vitest" : all.jest ? "Jest" : "Vitest";
+        testRec = `Set up ${suggestedFramework} and write unit tests for all core business logic. Aim for at least 60% coverage on critical paths.`;
+      }
       plan.push({
         priority: "high",
         title: "Add automated tests",
         reason: "No test files were found in the repository.",
-        recommendation: `Set up ${suggestedFramework} and write unit tests for all core business logic. Aim for at least 60% coverage on critical paths.`,
+        recommendation: testRec,
       });
     }
 
@@ -1179,19 +1307,23 @@ ${fnTests}
     }
 
     if (depOutdated.length > 0) {
+      const updateCmd = isJs
+        ? "Run `npm outdated` to review all outdated packages."
+        : isPython
+        ? "Run `pip list --outdated` to review all outdated packages."
+        : isGo
+        ? "Run `go get -u ./...` to update all Go dependencies."
+        : "Review and update your dependency manifest.";
       plan.push({
         priority: "medium",
         title: `Update ${depOutdated.length} outdated ${depOutdated.length === 1 ? "dependency" : "dependencies"}`,
         reason: `${depOutdated.map((d) => `${d.pkg} (${d.current} → ${d.latest})`).join(", ")}.`,
-        recommendation: "Run `npm outdated` to review all outdated packages. Update one major version at a time and run tests after each upgrade to catch breaking changes.",
+        recommendation: `${updateCmd} Update one major version at a time and run tests after each upgrade to catch breaking changes.`,
       });
     }
 
     if (envVars.length > 0) {
-      const hasEnvExample = pkg
-        ? Object.keys({ ...pkg.dependencies, ...pkg.devDependencies }).includes("dotenv") ||
-          fileTree.some((f) => f.includes(".env.example"))
-        : false;
+      const hasEnvExample = fileTree.some((f) => f.includes(".env.example") || f.includes(".env.sample"));
       if (!hasEnvExample) {
         plan.push({
           priority: "low",
@@ -1211,13 +1343,37 @@ ${fnTests}
       });
     }
 
+    // Fallback padding — language-specific tips
     if (plan.length < 3) {
-      plan.push({
-        priority: "low",
-        title: "Add TypeScript strict mode",
-        reason: "Stricter TypeScript settings help catch bugs earlier and improve code quality.",
-        recommendation: 'Enable `"strict": true` in `tsconfig.json` and gradually fix type errors. Pay particular attention to `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`.',
-      });
+      if (isJs && (all.typescript || all["@types/node"])) {
+        plan.push({
+          priority: "low",
+          title: "Enable TypeScript strict mode",
+          reason: "Stricter TypeScript settings help catch bugs earlier and improve code quality.",
+          recommendation: 'Enable `"strict": true` in `tsconfig.json` and gradually fix type errors.',
+        });
+      } else if (isPython) {
+        plan.push({
+          priority: "low",
+          title: "Add type hints and mypy",
+          reason: "Type hints improve code readability and help catch bugs at development time.",
+          recommendation: "Add type hints to function signatures and run `mypy .` to catch type errors.",
+        });
+      } else if (isGo) {
+        plan.push({
+          priority: "low",
+          title: "Add Go linting",
+          reason: "Linting catches common Go mistakes and enforces code style.",
+          recommendation: "Install golangci-lint and add a GitHub Actions step to run `golangci-lint run ./...` on PRs.",
+        });
+      } else {
+        plan.push({
+          priority: "low",
+          title: "Add code quality tooling",
+          reason: "Linters and formatters keep the codebase consistent as it grows.",
+          recommendation: "Add a linter appropriate for your language and integrate it into your CI pipeline.",
+        });
+      }
     }
 
     return plan.slice(0, 5);
@@ -1234,23 +1390,38 @@ ${fnTests}
 
     // Count meaningful signals
     const depsCount = Object.keys(pkg?.dependencies || {}).length;
-    const testCount = fileTree.filter((f) => f.includes(".test.") || f.includes(".spec.")).length;
+    const testCount = fileTree.filter(
+      (f) => f.includes(".test.") || f.includes(".spec.") || /_test\.(py|go|rs|java)$/.test(f)
+    ).length;
     const hasCI = fileTree.some((f) => f.includes(".github/workflows"));
     const stars = metadata?.stars;
-    const liveUrl = metadata?.githubSlug ? `https://github.com/${metadata.githubSlug}` : null;
+
+    // Build language/framework phrase — avoid "Unknown" leaking into user-visible text
+    const knownLang = language && language !== "Unknown" ? language : null;
+    const knownFw = framework && framework !== "Unknown" && framework !== language ? framework : null;
+    const techPhrase = knownLang && knownFw
+      ? `${knownLang} project built with ${knownFw}`
+      : knownLang
+      ? `${knownLang} project`
+      : knownFw
+      ? `project built with ${knownFw}`
+      : "software project";
 
     let summary = "";
 
     if (ghDesc && ghDesc.length > 20) {
-      summary = `${name} is a ${language} project built with ${framework}. ${ghDesc}`;
+      summary = `${name} is a ${techPhrase}. ${ghDesc}`;
     } else if (readmeDesc && readmeDesc.length > 30) {
-      summary = `${name} is a ${language} application using ${framework}. ${readmeDesc}`;
+      summary = `${name} is a ${techPhrase}. ${readmeDesc}`;
     } else {
-      summary = `${name} is a ${language} application built with ${framework}.`;
+      summary = `${name} is a ${techPhrase}.`;
     }
 
-    // Add stack highlights
-    const notableStack = stack.filter((s) => !["TypeScript", "JavaScript", language, framework].includes(s)).slice(0, 3);
+    // Add notable stack highlights (skip language, framework, and generic TypeScript/JavaScript)
+    const notableStack = stack.filter(
+      (s) => s && s !== "Unknown" && s !== language && s !== framework &&
+             s !== "TypeScript" && s !== "JavaScript"
+    ).slice(0, 3);
     if (notableStack.length > 0) {
       summary += ` It uses ${notableStack.join(", ")}.`;
     }
