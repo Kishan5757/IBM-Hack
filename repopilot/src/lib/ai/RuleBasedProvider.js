@@ -16,6 +16,7 @@
  *   - config files   → docker, CI, linting, env examples
  *   - test files     → framework detection, coverage estimation
  *   - README         → quality scoring, missing sections
+ *   - metadata       → GitHub stars, description, language, slug
  */
 
 // ─── Framework detection rules ────────────────────────────────────────────────
@@ -24,6 +25,7 @@ const FRAMEWORK_RULES = [
   { test: (p) => p.dependencies?.next || p.devDependencies?.next, name: "Next.js", type: "Full-Stack Framework" },
   { test: (p) => p.dependencies?.["@angular/core"], name: "Angular", type: "Frontend Framework" },
   { test: (p) => p.dependencies?.vue || p.devDependencies?.vue, name: "Vue.js", type: "Frontend Framework" },
+  { test: (p) => p.dependencies?.["@nuxtjs/core"] || p.devDependencies?.nuxt, name: "Nuxt.js", type: "Full-Stack Framework" },
   { test: (p) => p.dependencies?.react || p.dependencies?.["react-dom"], name: "React", type: "Frontend Library" },
   { test: (p) => p.dependencies?.express, name: "Express.js", type: "Backend Framework" },
   { test: (p) => p.dependencies?.fastify, name: "Fastify", type: "Backend Framework" },
@@ -37,6 +39,8 @@ const FRAMEWORK_RULES = [
   { test: (p) => p.dependencies?.["gatsby"], name: "Gatsby", type: "Static Site Framework" },
   { test: (p) => p.dependencies?.["electron"], name: "Electron", type: "Desktop App Framework" },
   { test: (p) => p.dependencies?.["react-native"] || p.dependencies?.["expo"], name: "React Native / Expo", type: "Mobile Framework" },
+  { test: (p) => p.dependencies?.["@builder.io/qwik"] || p.devDependencies?.["@builder.io/qwik"], name: "Qwik", type: "Frontend Framework" },
+  { test: (p) => p.dependencies?.["@tanstack/start"] || p.dependencies?.["@tanstack/react-start"], name: "TanStack Start", type: "Full-Stack Framework" },
 ];
 
 const TEST_FRAMEWORK_RULES = [
@@ -48,6 +52,7 @@ const TEST_FRAMEWORK_RULES = [
   { test: (p) => p.devDependencies?.cypress, name: "Cypress" },
   { test: (p) => p.devDependencies?.playwright || p.devDependencies?.["@playwright/test"], name: "Playwright" },
   { test: (p) => p.devDependencies?.ava, name: "AVA" },
+  { test: (p) => p.devDependencies?.bun, name: "Bun Test" },
 ];
 
 const LANGUAGE_BY_EXT = {
@@ -57,19 +62,46 @@ const LANGUAGE_BY_EXT = {
   java: "Java", kt: "Kotlin", cs: "C#",
   cpp: "C++", c: "C", php: "PHP", swift: "Swift",
   scala: "Scala", clj: "Clojure",
+  dart: "Dart", lua: "Lua", r: "R",
 };
 
-// Known CVEs / outdated patterns (no CVE number invented — only well-known advisories)
-const KNOWN_VULNERABLE = new Set([
-  "lodash", "minimist", "node-fetch", "axios", "serialize-javascript",
-  "ws", "tough-cookie", "semver", "word-wrap", "json5",
-]);
+// Known vulnerability patterns: { pkg, versionRe, severity, advisory }
+// Only well-documented advisories — no invented CVEs.
+const VULNERABILITY_ADVISORIES = [
+  { pkg: "lodash", versionRe: /^\^?[0-3]\./, severity: "MEDIUM", advisory: "Prototype pollution vulnerabilities in lodash < 4.17.21. Upgrade to 4.17.21+." },
+  { pkg: "minimist", versionRe: /^\^?0\.|^\^?1\.[01]\./, severity: "MEDIUM", advisory: "Prototype pollution in minimist < 1.2.6. Upgrade to latest." },
+  { pkg: "node-fetch", versionRe: /^\^?[12]\./, severity: "LOW", advisory: "Older node-fetch v2 may lack SSRF protections present in v3+." },
+  { pkg: "serialize-javascript", versionRe: /^\^?[0-3]\.|^\^?4\.[0-1]\./, severity: "MEDIUM", advisory: "XSS via unsafe serialization in serialize-javascript < 4.0.0." },
+  { pkg: "semver", versionRe: /^\^?[0-6]\./, severity: "LOW", advisory: "ReDoS vulnerability in semver < 7.5.2. Upgrade to 7.5.4+." },
+  { pkg: "tough-cookie", versionRe: /^\^?[0-3]\./, severity: "MEDIUM", advisory: "Prototype pollution in tough-cookie < 4.1.3." },
+  { pkg: "ws", versionRe: /^\^?[0-6]\./, severity: "LOW", advisory: "DoS vulnerability in ws < 7.4.6. Upgrade to 8.x." },
+  { pkg: "json5", versionRe: /^\^?[0-1]\./, severity: "MEDIUM", advisory: "Prototype pollution in json5 < 2.2.2." },
+  { pkg: "word-wrap", versionRe: /^\^?[0]\./, severity: "LOW", advisory: "ReDoS in word-wrap < 1.2.4." },
+  { pkg: "axios", versionRe: /^\^?0\.[0-9]\./, severity: "LOW", advisory: "SSRF and open redirect in axios < 0.21.2. Use axios 1.x." },
+];
+
+// Known outdated major versions — compared against installed version string
+const OUTDATED_PATTERNS = [
+  { pkg: "react", old: /^\^?[0-9]\.|^\^?1[0-7]\./, latest: "19.x" },
+  { pkg: "react-dom", old: /^\^?[0-9]\.|^\^?1[0-7]\./, latest: "19.x" },
+  { pkg: "next", old: /^\^?[0-9]\.|^\^?1[0-3]\./, latest: "15.x" },
+  { pkg: "typescript", old: /^\^?[0-4]\./, latest: "5.x" },
+  { pkg: "tailwindcss", old: /^\^?[0-2]\./, latest: "4.x" },
+  { pkg: "eslint", old: /^\^?[0-7]\./, latest: "9.x" },
+  { pkg: "vite", old: /^\^?[0-3]\./, latest: "6.x" },
+  { pkg: "webpack", old: /^\^?[0-4]\./, latest: "5.x" },
+  { pkg: "@angular/core", old: /^\^?1[0-5]\./, latest: "19.x" },
+  { pkg: "vue", old: /^\^?[12]\./, latest: "3.x" },
+  { pkg: "express", old: /^\^?[0-3]\./, latest: "5.x" },
+  { pkg: "node-fetch", old: /^\^?[12]\./, latest: "3.x" },
+  { pkg: "jest", old: /^\^?2[0-8]\./, latest: "29.x" },
+];
 
 // ─── Provider ─────────────────────────────────────────────────────────────────
 
 export class RuleBasedProvider {
   constructor() {
-    this.model = "rule-engine-v1";
+    this.model = "rule-engine-v2";
   }
 
   /**
@@ -80,7 +112,7 @@ export class RuleBasedProvider {
    */
   async analyzeRepository(repositoryContext) {
     console.log(
-      `[RuleBasedProvider] Analyzing ${repositoryContext.repositoryName} with local rule engine`
+      `[RuleBasedProvider] Analyzing ${repositoryContext.repositoryName} with local rule engine v2`
     );
     // Synchronous analysis — wrapped in Promise so the interface is consistent
     const analysis = this._analyze(repositoryContext);
@@ -117,11 +149,11 @@ export class RuleBasedProvider {
     const envVars = this._extractEnvVars(sourceFiles, configurationFiles);
 
     // ── 4. Setup steps ───────────────────────────────────────────────────────
-    const setupSteps = this._buildSetupSteps(pkg, repositoryName, configurationFiles, language, framework);
+    const setupSteps = this._buildSetupSteps(pkg, repositoryName, configurationFiles, language, framework, metadata);
 
     // ── 5. README quality ────────────────────────────────────────────────────
     const { qualityScore, missingSections, readmeIssues } = this._scoreReadme(readme);
-    const generatedMarkdown = this._generateReadme(repositoryName, metadata, pkg, language, framework, stack, setupSteps, envVars, fileTree);
+    const generatedMarkdown = this._generateReadme(repositoryName, metadata, pkg, language, framework, stack, setupSteps, envVars, fileTree, readme);
 
     // ── 6. Dead code detection ───────────────────────────────────────────────
     const deadCode = this._detectDeadCode(sourceFiles, fileTree);
@@ -133,17 +165,17 @@ export class RuleBasedProvider {
     // ── 8. Health scoring ────────────────────────────────────────────────────
     const criticalIssues = depAlerts.filter((a) => a.severity === "CRITICAL").length;
     const warnings =
-      missingSections.length +
+      missingSections.filter((s) => ["Installation", "Usage"].includes(s)).length +
       depOutdated.length +
       (Object.keys(testFiles).length === 0 ? 1 : 0) +
       (!readme ? 1 : 0);
     const healthScore = Math.max(10, Math.min(100, 100 - criticalIssues * 15 - warnings * 5));
 
     // ── 9. Action plan ───────────────────────────────────────────────────────
-    const actionPlan = this._buildActionPlan(criticalIssues, warnings, depOutdated, testFiles, readme, envVars, pkg);
+    const actionPlan = this._buildActionPlan(criticalIssues, warnings, depOutdated, testFiles, readme, envVars, pkg, fileTree);
 
     // ── 10. Overview summary ─────────────────────────────────────────────────
-    const summary = this._buildSummary(repositoryName, metadata, language, framework, pkg, fileTree);
+    const summary = this._buildSummary(repositoryName, metadata, language, framework, pkg, fileTree, readme, stack);
 
     // ── 11. Setup status ─────────────────────────────────────────────────────
     const setupStatus = criticalIssues > 0 ? "critical" : warnings > 2 ? "warning" : "healthy";
@@ -151,7 +183,7 @@ export class RuleBasedProvider {
     // ── 12. Docker detection ─────────────────────────────────────────────────
     const hasDockerfile = fileTree.some((f) => f === "Dockerfile" || f.endsWith("/Dockerfile"));
     const hasCompose = fileTree.some((f) => f.includes("docker-compose"));
-    const dockerCommand = hasDockerfile ? "docker build -t " + repositoryName + " . && docker run -p 3000:3000 " + repositoryName : "";
+    const dockerCommand = hasDockerfile ? `docker build -t ${repositoryName} . && docker run -p 3000:3000 ${repositoryName}` : "";
     const dockerCompose = hasCompose ? "docker compose up --build -d" : "";
 
     return {
@@ -193,11 +225,13 @@ export class RuleBasedProvider {
   // ─── Language detection ────────────────────────────────────────────────────
 
   _detectLanguage(pkg, fileTree, metadata) {
+    // GitHub-detected language is the most reliable signal
     if (metadata?.language) return metadata.language;
 
-    // Count file extensions
+    // Count file extensions (exclude test and config files from the count)
     const counts = {};
     for (const f of fileTree) {
+      if (f.includes("node_modules/") || f.includes(".next/") || f.includes("dist/")) continue;
       const ext = f.split(".").pop()?.toLowerCase();
       if (ext && LANGUAGE_BY_EXT[ext]) {
         counts[ext] = (counts[ext] || 0) + 1;
@@ -215,18 +249,26 @@ export class RuleBasedProvider {
 
   _detectFramework(pkg, fileTree, configFiles, language) {
     if (!pkg) {
-      // Non-JS: detect from config files
+      // Non-JS: detect from config files and file tree
       const configKeys = Object.keys(configFiles).join(" ").toLowerCase();
+      const treeStr = fileTree.join(" ").toLowerCase();
+
       if (configKeys.includes("requirements.txt") || configKeys.includes("pyproject.toml")) {
         const reqContent = configFiles["requirements.txt"] || "";
-        if (reqContent.includes("django")) return { framework: "Django", stack: ["Python", "Django"] };
-        if (reqContent.includes("flask")) return { framework: "Flask", stack: ["Python", "Flask"] };
-        if (reqContent.includes("fastapi")) return { framework: "FastAPI", stack: ["Python", "FastAPI"] };
+        const pyprojectContent = configFiles["pyproject.toml"] || "";
+        const combined = reqContent + pyprojectContent;
+        if (combined.match(/django/i)) return { framework: "Django", stack: ["Python", "Django"] };
+        if (combined.match(/flask/i)) return { framework: "Flask", stack: ["Python", "Flask"] };
+        if (combined.match(/fastapi/i)) return { framework: "FastAPI", stack: ["Python", "FastAPI", "Uvicorn"] };
+        if (combined.match(/tornado/i)) return { framework: "Tornado", stack: ["Python", "Tornado"] };
+        if (combined.match(/starlette/i)) return { framework: "Starlette", stack: ["Python", "Starlette"] };
         return { framework: "Python", stack: ["Python"] };
       }
-      if (configKeys.includes("go.mod")) return { framework: "Go", stack: ["Go"] };
-      if (configKeys.includes("cargo.toml")) return { framework: "Rust / Cargo", stack: ["Rust"] };
-      if (configKeys.includes("pom.xml") || configKeys.includes("build.gradle")) return { framework: "Java / Maven", stack: ["Java"] };
+      if (configKeys.includes("go.mod") || treeStr.includes("go.mod")) return { framework: "Go", stack: ["Go"] };
+      if (configKeys.includes("cargo.toml") || treeStr.includes("cargo.toml")) return { framework: "Rust / Cargo", stack: ["Rust"] };
+      if (configKeys.includes("pom.xml") || treeStr.includes("pom.xml")) return { framework: "Spring / Maven", stack: ["Java", "Maven"] };
+      if (configKeys.includes("build.gradle") || treeStr.includes("build.gradle")) return { framework: "Gradle / Spring", stack: ["Java", "Gradle"] };
+      if (treeStr.includes("pubspec.yaml")) return { framework: "Flutter / Dart", stack: ["Dart", "Flutter"] };
       return { framework: language, stack: [language] };
     }
 
@@ -237,31 +279,105 @@ export class RuleBasedProvider {
       }
     }
 
-    return { framework: language === "TypeScript" ? "TypeScript (Node.js)" : "Node.js", stack: this._buildStack(pkg, "Node.js", language) };
+    return {
+      framework: language === "TypeScript" ? "TypeScript (Node.js)" : "Node.js",
+      stack: this._buildStack(pkg, "Node.js", language),
+    };
   }
 
   _buildStack(pkg, framework, language) {
-    const stack = new Set([language, framework]);
+    const stack = new Set([language, framework].filter(Boolean));
     const all = { ...pkg.dependencies, ...pkg.devDependencies };
 
-    if (all.typescript || all["@types/node"]) stack.add("TypeScript");
+    // Languages / type layers
+    if (all.typescript || all["@types/node"] || all["@types/react"]) stack.add("TypeScript");
+
+    // Styling
     if (all.tailwindcss) stack.add("Tailwind CSS");
+    if (all["styled-components"]) stack.add("Styled Components");
+    if (all["@emotion/react"] || all["@emotion/styled"]) stack.add("Emotion");
+    if (all.sass || all["node-sass"]) stack.add("Sass");
+    if (all["@mui/material"] || all["@material-ui/core"]) stack.add("Material UI");
+    if (all["@chakra-ui/react"]) stack.add("Chakra UI");
+    if (all["@mantine/core"]) stack.add("Mantine");
+    if (all["antd"]) stack.add("Ant Design");
+
+    // UI libraries / component systems
+    if (all["lucide-react"]) stack.add("Lucide");
+    if (all["@radix-ui/react-dialog"] || all["@radix-ui/react-slot"] || Object.keys(all).some((k) => k.startsWith("@radix-ui/"))) stack.add("Radix UI");
+    if (all.shadcn || all["@shadcn/ui"]) stack.add("shadcn/ui");
+    if (all["framer-motion"]) stack.add("Framer Motion");
+    if (all["react-icons"]) stack.add("React Icons");
+
+    // State management
+    if (all.zustand) stack.add("Zustand");
+    if (all.jotai) stack.add("Jotai");
+    if (all.recoil) stack.add("Recoil");
+    if (all.redux || all["@reduxjs/toolkit"]) stack.add("Redux Toolkit");
+    if (all.mobx) stack.add("MobX");
+    if (all.valtio) stack.add("Valtio");
+
+    // Data fetching / query
+    if (all["@tanstack/react-query"] || all["react-query"]) stack.add("TanStack Query");
+    if (all["@tanstack/react-table"]) stack.add("TanStack Table");
+    if (all["@tanstack/react-router"]) stack.add("TanStack Router");
+    if (all["react-router-dom"] || all["react-router"]) stack.add("React Router");
+    if (all.swr) stack.add("SWR");
+
+    // Database / ORM
     if (all.prisma || all["@prisma/client"]) stack.add("Prisma");
     if (all.mongoose || all.mongodb) stack.add("MongoDB");
-    if (all.pg || all.postgres) stack.add("PostgreSQL");
+    if (all.pg || all.postgres || all["@neondatabase/serverless"]) stack.add("PostgreSQL");
     if (all.mysql2 || all.mysql) stack.add("MySQL");
     if (all.redis || all.ioredis) stack.add("Redis");
-    if (all.graphql || all["@apollo/server"]) stack.add("GraphQL");
-    if (all.trpc || all["@trpc/server"]) stack.add("tRPC");
-    if (all.zod) stack.add("Zod");
-    if (all.stripe) stack.add("Stripe");
-    if (all["next-auth"] || all["@auth/core"]) stack.add("Auth.js");
-    if (all["framer-motion"]) stack.add("Framer Motion");
-    if (all["lucide-react"]) stack.add("Lucide");
-    if (all["@radix-ui/react-dialog"] || all["@radix-ui/react-slot"]) stack.add("Radix UI");
-    if (all.shadcn) stack.add("shadcn/ui");
+    if (all["better-sqlite3"] || all["@libsql/client"]) stack.add("SQLite");
+    if (all.drizzle || all["drizzle-orm"]) stack.add("Drizzle ORM");
+    if (all["@vercel/postgres"]) stack.add("Vercel Postgres");
 
-    return [...stack].filter(Boolean).slice(0, 8);
+    // Backend as a service / cloud
+    if (all["@supabase/supabase-js"] || all["@supabase/ssr"]) stack.add("Supabase");
+    if (all.firebase || all["firebase-admin"] || all["@firebase/app"]) stack.add("Firebase");
+    if (all["aws-sdk"] || all["@aws-sdk/client-s3"]) stack.add("AWS SDK");
+    if (all["@vercel/sdk"]) stack.add("Vercel SDK");
+
+    // Auth
+    if (all["next-auth"] || all["@auth/core"] || all["@auth/nextjs"]) stack.add("Auth.js");
+    if (all["@clerk/nextjs"] || all["@clerk/clerk-react"]) stack.add("Clerk");
+    if (all["@lucia-auth/core"] || all.lucia) stack.add("Lucia Auth");
+    if (all["better-auth"]) stack.add("Better Auth");
+
+    // APIs / protocols
+    if (all.graphql || all["@apollo/server"] || all["@apollo/client"]) stack.add("GraphQL");
+    if (all.trpc || all["@trpc/server"]) stack.add("tRPC");
+    if (all["openai"] || all["@openai/api"]) stack.add("OpenAI SDK");
+    if (all["@anthropic-ai/sdk"]) stack.add("Anthropic SDK");
+    if (all["@google/generative-ai"]) stack.add("Google Gemini SDK");
+    if (all.langchain || all["langchain"]) stack.add("LangChain");
+
+    // Validation
+    if (all.zod) stack.add("Zod");
+    if (all.yup) stack.add("Yup");
+    if (all["class-validator"]) stack.add("class-validator");
+
+    // Payments
+    if (all.stripe) stack.add("Stripe");
+    if (all["@lemonsqueezy/lemonsqueezy.js"]) stack.add("Lemon Squeezy");
+
+    // Maps / geo
+    if (all.leaflet || all["react-leaflet"]) stack.add("Leaflet / OpenStreetMap");
+    if (all["mapbox-gl"] || all["@vis.gl/react-mapbox"]) stack.add("Mapbox");
+    if (all["@googlemaps/js-api-loader"]) stack.add("Google Maps");
+
+    // UI theming
+    if (all["next-themes"]) stack.add("next-themes");
+
+    // Utilities
+    if (all.axios) stack.add("Axios");
+    if (all["date-fns"] || all.dayjs || all.moment) stack.add("Date utilities");
+    if (all["class-variance-authority"] || all.clsx || all["tailwind-merge"]) stack.add("CVA / clsx");
+    if (all.socket || all["socket.io"] || all["socket.io-client"]) stack.add("Socket.IO");
+
+    return [...stack].filter(Boolean).slice(0, 12);
   }
 
   // ─── Test framework detection ──────────────────────────────────────────────
@@ -294,36 +410,34 @@ export class RuleBasedProvider {
     const prod = pkg.dependencies || {};
     const dev = pkg.devDependencies || {};
 
+    // Build nodes for all dependencies
     for (const [name, version] of Object.entries(prod)) {
-      const health = KNOWN_VULNERABLE.has(name) ? "warning" : "ok";
+      const isVuln = VULNERABILITY_ADVISORIES.some((a) => a.pkg === name && a.versionRe.test(version));
+      const health = isVuln ? "warning" : "ok";
       depNodes.push({ id: name, label: `${name}@${version}`, type: "dep", health });
     }
     for (const [name, version] of Object.entries(dev)) {
-      const health = KNOWN_VULNERABLE.has(name) ? "warning" : "ok";
+      const isVuln = VULNERABILITY_ADVISORIES.some((a) => a.pkg === name && a.versionRe.test(version));
+      const health = isVuln ? "warning" : "ok";
       depNodes.push({ id: `dev-${name}`, label: `${name}@${version}`, type: "devDep", health });
     }
 
-    // Flag potentially vulnerable known packages
-    for (const [name] of Object.entries(prod)) {
-      if (KNOWN_VULNERABLE.has(name)) {
+    // Generate alerts for version-matched vulnerabilities only
+    const allDeps = { ...prod, ...dev };
+    for (const advisory of VULNERABILITY_ADVISORIES) {
+      const version = allDeps[advisory.pkg];
+      if (version && advisory.versionRe.test(version)) {
         depAlerts.push({
-          pkg: name,
-          severity: "MEDIUM",
+          pkg: advisory.pkg,
+          severity: advisory.severity,
           cve: "",
-          desc: `${name} has had historical security advisories. Consider running \`npm audit\` to check the installed version.`,
+          desc: advisory.advisory,
         });
       }
     }
 
-    // Detect very old major versions (heuristic based on version string)
-    const oldPatterns = [
-      { pkg: "react", old: /^\^?[0-9]\.|^\^?1[0-5]\./, latest: "19.x" },
-      { pkg: "next", old: /^\^?[0-9]\.|^\^?1[0-2]\./, latest: "15.x" },
-      { pkg: "typescript", old: /^\^?[0-4]\./, latest: "5.x" },
-      { pkg: "tailwindcss", old: /^\^?[0-2]\./, latest: "4.x" },
-      { pkg: "eslint", old: /^\^?[0-7]\./, latest: "9.x" },
-    ];
-    for (const { pkg: name, old: re, latest } of oldPatterns) {
+    // Outdated major version detection
+    for (const { pkg: name, old: re, latest } of OUTDATED_PATTERNS) {
       const v = prod[name] || dev[name];
       if (v && re.test(v)) {
         depOutdated.push({ pkg: name, current: v, latest, status: "outdated" });
@@ -338,23 +452,35 @@ export class RuleBasedProvider {
   _extractEnvVars(sourceFiles, configFiles) {
     const vars = new Map();
 
-    // From .env.example / .env.sample
+    // Priority 1: .env.example / .env.sample (most reliable source)
     for (const [path, content] of Object.entries(configFiles)) {
       if (/\.env\.(example|sample|template)/i.test(path) || path === ".env.example") {
         for (const line of content.split("\n")) {
-          const m = line.match(/^([A-Z_][A-Z0-9_]*)=?(.*)?$/);
-          if (m && !line.startsWith("#")) {
-            vars.set(m[1], { key: m[1], example: (m[2] || "").trim(), required: true });
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith("#")) continue;
+          const m = trimmed.match(/^([A-Z_][A-Z0-9_]*)=?(.*)?$/);
+          if (m) {
+            vars.set(m[1], { key: m[1], example: (m[2] || "").trim().replace(/^["']|["']$/g, ""), required: true });
           }
         }
       }
     }
 
-    // From source files: process.env.XXX
+    // Priority 2: process.env.XXX references in source files
     const envRe = /process\.env\.([A-Z_][A-Z0-9_]*)/g;
     for (const [, content] of Object.entries(sourceFiles)) {
       let match;
       while ((match = envRe.exec(content)) !== null) {
+        const key = match[1];
+        if (!vars.has(key)) vars.set(key, { key, example: "", required: true });
+      }
+    }
+
+    // Priority 3: import.meta.env.VITE_XXX for Vite projects
+    const viteEnvRe = /import\.meta\.env\.([A-Z_][A-Z0-9_]*)/g;
+    for (const [, content] of Object.entries(sourceFiles)) {
+      let match;
+      while ((match = viteEnvRe.exec(content)) !== null) {
         const key = match[1];
         if (!vars.has(key)) vars.set(key, { key, example: "", required: true });
       }
@@ -365,17 +491,21 @@ export class RuleBasedProvider {
 
   // ─── Setup steps ──────────────────────────────────────────────────────────
 
-  _buildSetupSteps(pkg, repoName, configFiles, language, framework) {
+  _buildSetupSteps(pkg, repoName, configFiles, language, framework, metadata) {
     const steps = [];
     let id = 1;
 
     const slug = repoName.toLowerCase().replace(/\s+/g, "-");
+    const ghSlug = metadata?.githubSlug;
 
-    // Clone
+    // Clone step — use real GitHub URL if available
+    const cloneUrl = ghSlug
+      ? `https://github.com/${ghSlug}.git`
+      : `https://github.com/example/${slug}.git`;
     steps.push({
       id: id++,
       title: "Clone the repository",
-      command: `git clone https://github.com/example/${slug}.git && cd ${slug}`,
+      command: `git clone ${cloneUrl} && cd ${slug}`,
       description: "Clone the project to your local machine.",
     });
 
@@ -385,7 +515,7 @@ export class RuleBasedProvider {
       if (lang === "python") {
         steps.push({ id: id++, title: "Create virtual environment", command: "python -m venv venv && source venv/bin/activate", description: "Isolate project dependencies." });
         steps.push({ id: id++, title: "Install dependencies", command: "pip install -r requirements.txt", description: "Install required Python packages." });
-        const hasEnvExample = Object.keys(configFiles).some((f) => f.includes(".env.example"));
+        const hasEnvExample = Object.keys(configFiles).some((f) => f.includes(".env.example") || f.includes(".env.sample"));
         if (hasEnvExample) steps.push({ id: id++, title: "Configure environment", command: "cp .env.example .env", description: "Set up environment variables." });
         steps.push({ id: id++, title: "Run the application", command: "python main.py", description: "Start the application." });
       } else if (lang === "go") {
@@ -402,35 +532,83 @@ export class RuleBasedProvider {
       return steps;
     }
 
-    // Node.js/JS path
+    // Detect package manager
     const hasPnpm = Object.keys(configFiles).some((f) => f.includes("pnpm-lock"));
     const hasYarn = Object.keys(configFiles).some((f) => f.includes("yarn.lock"));
-    const pm = hasPnpm ? "pnpm" : hasYarn ? "yarn" : "npm";
+    const hasBun = Object.keys(configFiles).some((f) => f.includes("bun.lockb") || f.includes("bun.lock"));
+    const pm = hasBun ? "bun" : hasPnpm ? "pnpm" : hasYarn ? "yarn" : "npm";
 
     const installCmd = pm === "npm" ? "npm install" : `${pm} install`;
-    steps.push({ id: id++, title: "Install dependencies", command: installCmd, description: `Install all required packages using ${pm}.` });
+    steps.push({
+      id: id++,
+      title: "Install dependencies",
+      command: installCmd,
+      description: `Install all required packages using ${pm}.`,
+    });
 
+    // Environment setup
     const hasEnvExample = Object.keys(configFiles).some((f) => /\.env\.(example|sample)/i.test(f));
     if (hasEnvExample) {
-      steps.push({ id: id++, title: "Configure environment", command: "cp .env.example .env", description: "Copy the example env file and fill in required values." });
+      steps.push({
+        id: id++,
+        title: "Configure environment variables",
+        command: "cp .env.example .env",
+        description: "Copy the example env file and fill in required values.",
+      });
     }
 
-    // Check for a prisma schema
+    // Supabase setup
+    const all = { ...pkg.dependencies, ...pkg.devDependencies };
+    if (all["@supabase/supabase-js"] || all["@supabase/ssr"]) {
+      if (!hasEnvExample) {
+        steps.push({
+          id: id++,
+          title: "Configure Supabase environment",
+          command: 'echo "NEXT_PUBLIC_SUPABASE_URL=your_url\\nNEXT_PUBLIC_SUPABASE_ANON_KEY=your_key" > .env.local',
+          description: "Set your Supabase project URL and anon key (found in your Supabase dashboard).",
+        });
+      }
+    }
+
+    // Firebase setup
+    if (all.firebase || all["firebase-admin"]) {
+      if (!hasEnvExample) {
+        steps.push({
+          id: id++,
+          title: "Configure Firebase",
+          command: "# Set NEXT_PUBLIC_FIREBASE_API_KEY and related vars in .env.local",
+          description: "Add your Firebase configuration keys from the Firebase console.",
+        });
+      }
+    }
+
+    // Prisma
     const hasPrisma = Object.keys(configFiles).some((f) => f.includes("schema.prisma"));
     if (hasPrisma) {
       steps.push({ id: id++, title: "Generate Prisma client", command: "npx prisma generate", description: "Generate the Prisma database client." });
       steps.push({ id: id++, title: "Run database migrations", command: "npx prisma db push", description: "Apply database schema migrations." });
     }
 
+    // Start command
     const scripts = pkg.scripts || {};
-    const startCmd = scripts.dev ? `${pm} run dev` : scripts.start ? `${pm === "npm" ? "npm start" : `${pm} start`}` : `${pm} run dev`;
-    const startDesc = scripts.dev ? "Launch the development server with hot-reload." : "Start the application.";
-
+    const startCmd = scripts.dev
+      ? `${pm === "npm" ? "npm run dev" : `${pm} run dev`}`
+      : scripts.start
+      ? `${pm === "npm" ? "npm start" : `${pm} start`}`
+      : `${pm === "npm" ? "npm run dev" : `${pm} run dev`}`;
+    const startDesc = scripts.dev
+      ? "Launch the development server with hot-reload."
+      : "Start the application.";
     steps.push({ id: id++, title: "Start the development server", command: startCmd, description: startDesc });
 
-    // Build step if this looks like a production deploy
+    // Build step
     if (scripts.build) {
-      steps.push({ id: id++, title: "Build for production (optional)", command: `${pm} run build`, description: "Create an optimized production build." });
+      steps.push({
+        id: id++,
+        title: "Build for production (optional)",
+        command: `${pm === "npm" ? "npm run build" : `${pm} run build`}`,
+        description: "Create an optimized production build.",
+      });
     }
 
     return steps;
@@ -440,13 +618,16 @@ export class RuleBasedProvider {
 
   _runtimeRequirements(pkg, language) {
     const reqs = [];
-    if (language === "Python") reqs.push("Python 3.8+");
-    else if (language === "Go") reqs.push("Go 1.21+");
-    else if (language === "Rust") reqs.push("Rust 1.70+ (via rustup)");
+    if (language === "Python") reqs.push("Python 3.10+");
+    else if (language === "Go") reqs.push("Go 1.22+");
+    else if (language === "Rust") reqs.push("Rust 1.75+ (via rustup)");
+    else if (language === "Dart") reqs.push("Flutter 3.x / Dart 3.x");
     else if (pkg) {
       const engines = pkg.engines || {};
       if (engines.node) reqs.push(`Node.js ${engines.node}`);
       else reqs.push("Node.js 18+");
+      if (engines.npm) reqs.push(`npm ${engines.npm}`);
+      if (engines.pnpm) reqs.push(`pnpm ${engines.pnpm}`);
     }
     return reqs;
   }
@@ -466,60 +647,115 @@ export class RuleBasedProvider {
     const missing = [];
     let score = 0;
 
-    if (readme.includes("#")) { score += 15; } else { missing.push("Title"); }
-    if (lower.includes("description") || readme.length > 200) { score += 15; } else { missing.push("Description"); }
-    if (lower.includes("install") || lower.includes("getting started")) { score += 20; } else { missing.push("Installation"); }
-    if (lower.includes("usage") || lower.includes("example")) { score += 20; } else { missing.push("Usage"); }
-    if (lower.includes("contribut")) { score += 15; } else { missing.push("Contributing"); }
-    if (lower.includes("license") || lower.includes("licence")) { score += 15; } else { missing.push("License"); }
+    // Title (15 pts)
+    if (readme.match(/^#\s+\S/m)) { score += 15; } else { missing.push("Title"); }
+
+    // Description (15 pts) — any meaningful content beyond a bare title
+    if (readme.length > 300 || lower.includes("description") || lower.includes("platform") || lower.includes("application") || lower.includes("library") || lower.includes("tool")) {
+      score += 15;
+    } else {
+      missing.push("Description");
+    }
+
+    // Installation (20 pts)
+    if (lower.includes("install") || lower.includes("getting started") || lower.includes("setup") || lower.includes("npm install") || lower.includes("pip install")) {
+      score += 20;
+    } else {
+      missing.push("Installation");
+    }
+
+    // Usage / Features (20 pts)
+    if (lower.includes("usage") || lower.includes("example") || lower.includes("features") || lower.includes("how to use") || lower.includes("## demo") || lower.includes("## live")) {
+      score += 20;
+    } else {
+      missing.push("Usage");
+    }
+
+    // Contributing / Deployment / About (15 pts)
+    if (lower.includes("contribut") || lower.includes("deployment") || lower.includes("deploy") || lower.includes("## about") || lower.includes("tech stack")) {
+      score += 15;
+    } else {
+      missing.push("Contributing");
+    }
+
+    // License (15 pts)
+    if (lower.includes("license") || lower.includes("licence") || lower.includes("mit") || lower.includes("apache") || lower.includes("gpl")) {
+      score += 15;
+    } else {
+      missing.push("License");
+    }
 
     const issues = [];
     if (readme.length < 300) issues.push("README is very short — add more detail.");
-    if (!lower.includes("```")) issues.push("No code examples found — add usage snippets.");
-    if (!lower.includes("badge") && !lower.includes("[![")) issues.push("Consider adding status badges (CI, npm version, etc.).");
+    if (!lower.includes("```") && !lower.includes("~~~")) issues.push("No code examples found — add usage snippets.");
+    if (!lower.includes("badge") && !lower.includes("[![") && !lower.includes("img.shields.io")) {
+      issues.push("Consider adding status badges (CI, version, stars, etc.).");
+    }
+    if (!lower.includes("screenshot") && !lower.includes("demo") && !lower.includes("preview")) {
+      issues.push("Add a screenshot or live demo link to improve discoverability.");
+    }
 
     return { qualityScore: score, missingSections: missing, readmeIssues: issues };
   }
 
   // ─── README generation ────────────────────────────────────────────────────
 
-  _generateReadme(name, metadata, pkg, language, framework, stack, steps, envVars, fileTree) {
-    const desc = metadata?.description || `A ${framework} project.`;
+  _generateReadme(name, metadata, pkg, language, framework, stack, steps, envVars, fileTree, existingReadme) {
+    const desc = metadata?.description || (existingReadme ? this._extractDescription(existingReadme) : null) || `A ${framework} project.`;
     const ghSlug = metadata?.githubSlug;
-    const version = pkg?.version || "1.0.0";
+    const version = pkg?.version || null;
     const hasTests = fileTree.some((f) => f.includes(".test.") || f.includes(".spec.") || f.includes("__tests__"));
-    const license = fileTree.some((f) => f.toLowerCase().startsWith("license")) ? "MIT" : null;
+    const license = fileTree.some((f) => f.toLowerCase() === "license" || f.toLowerCase() === "license.md" || f.toLowerCase() === "license.txt") ? "MIT" : null;
 
+    // Badges
     const badgeBase = ghSlug ? `https://img.shields.io/github` : null;
     const badges = ghSlug
-      ? `[![Stars](${badgeBase}/stars/${ghSlug}?style=flat-square)](https://github.com/${ghSlug}) ` +
-        (hasTests ? `[![Tests](${badgeBase}/actions/workflows/test.yml/badge.svg)](https://github.com/${ghSlug}/actions) ` : "")
+      ? [
+          `[![Stars](${badgeBase}/stars/${ghSlug}?style=flat-square)](https://github.com/${ghSlug})`,
+          hasTests ? `[![Tests](${badgeBase}/actions/workflows/test.yml/badge.svg)](https://github.com/${ghSlug}/actions)` : null,
+          version ? `[![Version](https://img.shields.io/badge/version-${version}-blue?style=flat-square)](https://github.com/${ghSlug})` : null,
+        ].filter(Boolean).join(" ")
       : "";
 
-    const installStep = steps.find((s) => s.title.toLowerCase().includes("install"));
-    const startStep = steps.find((s) => s.title.toLowerCase().includes("start") || s.title.toLowerCase().includes("run"));
+    // Features — extract from existing readme or build from stack signals
+    const features = this._extractFeatures(existingReadme, pkg, fileTree, stack, framework);
 
+    // Version line
+    const versionLine = version && version !== "0.0.0" ? `\n**Version:** ${version}\n` : "";
+
+    // Deployment notes
+    const deploySection = this._buildDeploySection(fileTree, pkg, ghSlug, framework);
+
+    // Environment section
     const envSection = envVars.length > 0
       ? `\n## Environment Variables\n\nCopy \`.env.example\` to \`.env\` and configure:\n\n` +
         `| Variable | Required | Example |\n|---|---|---|\n` +
-        envVars.map((v) => `| \`${v.key}\` | ${v.required ? "Yes" : "No"} | \`${v.example || "..."}\` |`).join("\n")
+        envVars.map((v) => `| \`${v.key}\` | ${v.required ? "Yes" : "No"} | \`${v.example || "your_value_here"}\` |`).join("\n")
       : "";
 
+    // Tech stack section
     const stackSection = stack.length > 0
-      ? `\n## Tech Stack\n\n${stack.map((s) => `- **${s}**`).join("\n")}`
+      ? `\n## 🚀 Tech Stack\n\n${stack.map((s) => `**${s}**`).join("\n")}`
       : "";
 
+    // Scripts section
     const scriptsSection = pkg?.scripts && Object.keys(pkg.scripts).length > 0
       ? `\n## Available Scripts\n\n` +
         Object.entries(pkg.scripts)
-          .map(([k, v]) => `- \`npm run ${k}\` — \`${v}\``)
+          .map(([k, v]) => `\`npm run ${k}\` — \`${v}\``)
           .join("\n")
       : "";
 
+    // Dependencies count
     const depsCount = Object.keys(pkg?.dependencies || {}).length;
     const devDepsCount = Object.keys(pkg?.devDependencies || {}).length;
     const depSection = depsCount > 0
-      ? `\n## Dependencies\n\n${depsCount} production dependencies, ${devDepsCount} dev dependencies. Run \`npm audit\` to check for vulnerabilities.`
+      ? `\n## Dependencies\n\n${depsCount} production dependencies, ${devDepsCount} dev dependencies. Run \`npm audit\` to check for vulnerabilities.\n`
+      : "";
+
+    // About section
+    const aboutSection = metadata?.description
+      ? `\n## About\n\n${metadata.description}\n`
       : "";
 
     return `# ${name}
@@ -527,19 +763,117 @@ export class RuleBasedProvider {
 ${badges}
 
 ${desc}
-${version !== "1.0.0" ? `\n**Version:** ${version}` : ""}
-
+${versionLine}
 ## Getting Started
-${steps.map((s) => `\n### ${s.title}\n\`\`\`bash\n${s.command}\n\`\`\`\n${s.description}`).join("\n")}
+${steps.map((s) => `\n### ${s.title}\n\n\`\`\`bash\n${s.command}\n\`\`\`\n\n${s.description}`).join("\n")}
+${features ? `\n## ✨ Features\n\n${features}` : ""}
 ${envSection}
 ${stackSection}
 ${scriptsSection}
 ${depSection}
-${license ? `\n## License\n\nThis project is licensed under the ${license} License.` : ""}
+${deploySection}
+${aboutSection}
+${license ? `## License\n\nThis project is licensed under the ${license} License.` : ""}
 
 ---
+
 *Generated by RepoPilot Rule Engine*
-`.trim();
+`.replace(/\n{3,}/g, "\n\n").trim();
+  }
+
+  /**
+   * Extract the first meaningful paragraph from an existing README
+   * as a short project description.
+   */
+  _extractDescription(readme) {
+    const lines = readme.split("\n");
+    for (const line of lines) {
+      const trimmed = line.trim();
+      // Skip headings, badges, blank lines, and HTML tags
+      if (!trimmed) continue;
+      if (trimmed.startsWith("#")) continue;
+      if (trimmed.startsWith("[![") || trimmed.startsWith("![")) continue;
+      if (trimmed.startsWith("<") || trimmed.startsWith(">")) continue;
+      if (trimmed.length > 30) return trimmed;
+    }
+    return null;
+  }
+
+  /**
+   * Extract or synthesize a features list from README and stack signals.
+   */
+  _extractFeatures(existingReadme, pkg, fileTree, stack, framework) {
+    // Try to extract a "Features" section from the existing README
+    if (existingReadme) {
+      const featureMatch = existingReadme.match(/#{1,3}\s+(?:✨\s+)?Features?\s*\n([\s\S]*?)(?=\n#{1,3}|\n---|\z)/i);
+      if (featureMatch) return featureMatch[1].trim();
+    }
+
+    // Synthesise from stack signals
+    const features = [];
+    const all = pkg ? { ...pkg.dependencies, ...pkg.devDependencies } : {};
+
+    if (all["@supabase/supabase-js"]) features.push("🔄 Supabase backend with real-time database and authentication");
+    if (all.firebase) features.push("🔥 Firebase integration for real-time data sync");
+    if (all["next-auth"] || all["@auth/core"] || all["@clerk/nextjs"]) features.push("🔐 Authentication and session management");
+    if (all["react-leaflet"] || all.leaflet) features.push("🗺️ Interactive maps with Leaflet and OpenStreetMap");
+    if (all["@tanstack/react-query"]) features.push("⚡ Optimistic data fetching with TanStack Query");
+    if (all.stripe) features.push("💳 Stripe payment integration");
+    if (all["socket.io"] || all["socket.io-client"]) features.push("🔌 Real-time communication via Socket.IO");
+    if (all["framer-motion"]) features.push("🎨 Smooth animations with Framer Motion");
+    if (all.tailwindcss) features.push("🎨 Responsive UI built with Tailwind CSS");
+    if (all["next-themes"]) features.push("🌙 Dark / Light mode toggle");
+    if (all.graphql) features.push("📊 GraphQL API layer");
+    if (all.prisma) features.push("🗄️ Type-safe database access with Prisma ORM");
+    if (fileTree.some((f) => f.includes(".github/workflows"))) features.push("🤖 Automated CI/CD with GitHub Actions");
+    if (all["react-router-dom"] || all["react-router"]) features.push("🧭 Client-side routing with React Router");
+
+    if (features.length === 0) {
+      features.push(`Built with ${framework} for a modern development experience`);
+      if (stack.includes("TypeScript")) features.push("Full TypeScript type safety across the codebase");
+      if (stack.includes("Tailwind CSS")) features.push("Responsive, utility-first styling with Tailwind CSS");
+    }
+
+    return features.map((f) => `- ${f}`).join("\n");
+  }
+
+  /**
+   * Build deployment instructions based on detected tooling.
+   */
+  _buildDeploySection(fileTree, pkg, ghSlug, framework) {
+    const hasVercel = fileTree.some((f) => f.includes("vercel.json") || f === ".vercelrc");
+    const hasNetlify = fileTree.some((f) => f.includes("netlify.toml"));
+    const hasRailway = fileTree.some((f) => f.includes("railway.toml") || f.includes("railway.json"));
+    const hasDockerfile = fileTree.some((f) => f === "Dockerfile" || f.endsWith("/Dockerfile"));
+    const scripts = pkg?.scripts || {};
+
+    if (!hasVercel && !hasNetlify && !hasRailway && !hasDockerfile) return "";
+
+    const lines = ["\n## 🌐 Deployment"];
+
+    if (hasVercel || framework === "Next.js") {
+      lines.push("\n**Vercel (recommended for Next.js)**\n");
+      lines.push("1. Push your code to GitHub");
+      lines.push("2. Import the repository on [vercel.com](https://vercel.com)");
+      lines.push("3. Set environment variables in the Vercel dashboard");
+      lines.push("4. Deploy with `npm run build` / `dist` as the output directory");
+    }
+
+    if (hasNetlify) {
+      lines.push("\n**Netlify**\n");
+      lines.push("- Build command: `npm run build`");
+      lines.push("- Publish directory: `dist`");
+    }
+
+    if (hasDockerfile) {
+      lines.push("\n**Docker**\n");
+      lines.push("```bash");
+      lines.push(`docker build -t ${ghSlug?.split("/")[1] || "app"} .`);
+      lines.push(`docker run -p 3000:3000 ${ghSlug?.split("/")[1] || "app"}`);
+      lines.push("```");
+    }
+
+    return lines.join("\n");
   }
 
   // ─── Dead code detection ──────────────────────────────────────────────────
@@ -548,63 +882,75 @@ ${license ? `\n## License\n\nThis project is licensed under the ${license} Licen
     const items = [];
     let id = 0;
 
-    // Collect all exports across files
-    const allExports = new Map(); // symbol → file
-    const allImports = new Map(); // symbol → [files that import it]
+    // Collect all exports and imports across files
+    const allExports = new Map(); // symbol → { file, line, type }
+    const allImports = new Set(); // all imported symbol names (across all files)
 
-    const exportRe = /export\s+(?:default\s+)?(?:function|class|const|let|var|type|interface|enum)\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
-    const importRe = /import\s+(?:\{([^}]+)\}|([A-Za-z_$][A-Za-z0-9_$]*))\s+from/g;
+    // Regex patterns
+    const exportFnRe = /export\s+(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
+    const exportConstRe = /export\s+const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=/g;
+    const exportClassRe = /export\s+class\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
+    const exportTypeRe = /export\s+(?:type|interface|enum)\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
+    const namedImportRe = /import\s+\{([^}]+)\}\s+from/g;
+    const defaultImportRe = /import\s+([A-Za-z_$][A-Za-z0-9_$]*)\s+from/g;
 
     for (const [path, content] of Object.entries(sourceFiles)) {
-      let m;
-      exportRe.lastIndex = 0;
-      while ((m = exportRe.exec(content)) !== null) {
-        allExports.set(m[1], path);
-      }
-    }
+      const lines = content.split("\n");
 
-    for (const [, content] of Object.entries(sourceFiles)) {
-      let m;
-      importRe.lastIndex = 0;
-      while ((m = importRe.exec(content)) !== null) {
-        const named = m[1];
-        if (named) {
-          for (const sym of named.split(",").map((s) => s.trim().split(/\s+as\s+/)[0].trim())) {
-            if (sym) {
-              const arr = allImports.get(sym) || [];
-              arr.push(true);
-              allImports.set(sym, arr);
-            }
-          }
+      // Collect exports
+      for (const [re, symbolType] of [
+        [exportFnRe, "Unused Function"],
+        [exportConstRe, "Unused Variable"],
+        [exportClassRe, "Unused Component"],
+        [exportTypeRe, "Unused Variable"],
+      ]) {
+        re.lastIndex = 0;
+        let m;
+        while ((m = re.exec(content)) !== null) {
+          const lineIdx = content.slice(0, m.index).split("\n").length - 1;
+          allExports.set(m[1], { file: path, line: lineIdx + 1, symbolType });
         }
+      }
+
+      // Collect named imports
+      namedImportRe.lastIndex = 0;
+      let m;
+      while ((m = namedImportRe.exec(content)) !== null) {
+        for (const sym of m[1].split(",").map((s) => s.trim().split(/\s+as\s+/)[0].trim())) {
+          if (sym) allImports.add(sym);
+        }
+      }
+
+      // Collect default imports
+      defaultImportRe.lastIndex = 0;
+      while ((m = defaultImportRe.exec(content)) !== null) {
+        allImports.add(m[1]);
       }
     }
 
     // Flag exported symbols that are never imported
-    for (const [sym, file] of allExports.entries()) {
-      if (!allImports.has(sym) && sym !== "default") {
-        // Heuristic: skip common entry-point names
-        if (/^(App|Page|Layout|main|index|default|handler|GET|POST|PUT|DELETE|HEAD|middleware)$/.test(sym)) continue;
-        const lineMatch = (sourceFiles[file] || "").split("\n").findIndex((l) => l.includes(`export`) && l.includes(sym));
+    const ENTRY_POINT_SKIP = /^(App|Page|Layout|main|index|default|handler|GET|POST|PUT|DELETE|HEAD|PATCH|OPTIONS|middleware|config|metadata|generateMetadata|generateStaticParams|loader|action|ErrorBoundary|CatchBoundary)$/;
+    for (const [sym, { file, line, symbolType }] of allExports.entries()) {
+      if (!allImports.has(sym) && sym !== "default" && !ENTRY_POINT_SKIP.test(sym)) {
         items.push({
           id: `dc-rule-${id++}`,
           name: sym,
-          type: "Unused Export",
+          type: symbolType,
           file,
-          line: lineMatch >= 0 ? lineMatch + 1 : null,
+          line,
           severity: "low",
           confidence: 55,
           reason: `"${sym}" is exported but not imported by any other file in the scanned set.`,
-          evidence: [`Exported in: ${file}`],
+          evidence: [`Exported in: ${file}:${line}`],
         });
-        if (items.length >= 10) break; // cap at 10 items
+        if (items.length >= 8) break;
       }
     }
 
-    // Flag very large files (>500 lines) as candidates for splitting
+    // Flag large files as refactor candidates
     for (const [path, content] of Object.entries(sourceFiles)) {
-      const lines = content.split("\n").length;
-      if (lines > 500) {
+      const lineCount = content.split("\n").length;
+      if (lineCount > 500) {
         items.push({
           id: `dc-large-${id++}`,
           name: path.split("/").pop(),
@@ -613,9 +959,39 @@ ${license ? `\n## License\n\nThis project is licensed under the ${license} Licen
           line: null,
           severity: "low",
           confidence: 40,
-          reason: `File has ${lines} lines — consider splitting into smaller modules.`,
-          evidence: [`${lines} lines detected in ${path}`],
+          reason: `File has ${lineCount} lines — consider splitting into smaller, single-responsibility modules.`,
+          evidence: [`${lineCount} lines in ${path}`],
         });
+      }
+    }
+
+    // Flag unused imports within individual files
+    const unusedImportRe = /import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]/g;
+    for (const [path, content] of Object.entries(sourceFiles)) {
+      if (items.length >= 12) break;
+      unusedImportRe.lastIndex = 0;
+      let m;
+      while ((m = unusedImportRe.exec(content)) !== null) {
+        const importedNames = m[1].split(",").map((s) => s.trim().split(/\s+as\s+/).pop()?.trim()).filter(Boolean);
+        for (const imported of importedNames) {
+          // Check if used beyond the import line itself
+          const usageCount = (content.match(new RegExp(`\\b${imported}\\b`, "g")) || []).length;
+          if (usageCount === 1 && !imported.startsWith("_")) {
+            const lineIdx = content.slice(0, m.index).split("\n").length;
+            items.push({
+              id: `dc-import-${id++}`,
+              name: imported,
+              type: "Unused Import",
+              file: path,
+              line: lineIdx,
+              severity: "low",
+              confidence: 65,
+              reason: `"${imported}" is imported from "${m[2]}" but appears to be unused in this file.`,
+              evidence: [`Imported in: ${path}:${lineIdx}`],
+            });
+            break; // one per file to avoid noise
+          }
+        }
       }
     }
 
@@ -627,7 +1003,7 @@ ${license ? `\n## License\n\nThis project is licensed under the ${license} Licen
   _analyzeTests(testFramework, testFiles, sourceFiles, fileTree, language) {
     const testCount = Object.keys(testFiles).length;
     const sourceCount = Object.keys(sourceFiles).length;
-    const coverageEst = testCount === 0 ? "0%" : testCount >= sourceCount * 0.5 ? "~60%" : "~25%";
+    const coverageEst = testCount === 0 ? "0%" : testCount >= sourceCount * 0.5 ? "~65%" : testCount >= sourceCount * 0.2 ? "~30%" : "~15%";
     const coverageColor = testCount === 0 ? "rose" : testCount >= sourceCount * 0.5 ? "emerald" : "amber";
 
     const testStats = [
@@ -637,35 +1013,52 @@ ${license ? `\n## License\n\nThis project is licensed under the ${license} Licen
       { label: "Source Files", value: String(sourceCount), color: "indigo" },
     ];
 
-    // What files lack tests?
-    const testedPaths = new Set(
+    // Which source files lack a corresponding test file?
+    const testedBases = new Set(
       Object.keys(testFiles).map((p) =>
-        p.replace(/\.(test|spec)\.(js|ts|jsx|tsx)$/, ".$2").replace(/__tests__\//, "")
+        p.replace(/\.(test|spec)\.(js|ts|jsx|tsx)$/, "")
+          .replace(/__tests__\//, "")
+          .split("/").pop()
       )
     );
     const missingTests = Object.keys(sourceFiles)
-      .filter((p) => !testedPaths.has(p) && !p.includes("config") && !p.includes("index"))
+      .filter((p) => {
+        const base = p.split("/").pop().replace(/\.(ts|tsx|js|jsx)$/, "");
+        return !testedBases.has(base) && !p.includes("config") && !p.includes(".d.ts") && !p.match(/index\.(ts|js|tsx|jsx)$/);
+      })
       .slice(0, 6)
       .map((p) => p.split("/").pop());
 
     const testRecommendations = [];
-    if (testCount === 0) testRecommendations.push(`No tests found. Set up ${testFramework === "None detected" ? "Jest or Vitest" : testFramework} and add unit tests for core logic.`);
-    if (testCount > 0 && testCount < sourceCount * 0.3) testRecommendations.push("Test coverage appears low. Aim for at least 60% coverage.");
+    if (testCount === 0) {
+      testRecommendations.push(
+        `No tests found. Set up ${testFramework === "None detected" ? "Jest or Vitest" : testFramework} and add unit tests for core logic.`
+      );
+    }
+    if (testCount > 0 && testCount < sourceCount * 0.3) {
+      testRecommendations.push("Test coverage appears low. Aim for at least 60% coverage of business-critical code.");
+    }
     if (!fileTree.some((f) => f.includes(".github/workflows") || f.includes("ci.yml") || f.includes("ci.yaml"))) {
-      testRecommendations.push("No CI configuration detected. Add a GitHub Actions workflow to run tests automatically on push.");
+      testRecommendations.push("No CI configuration detected. Add a GitHub Actions workflow to run tests automatically on every pull request.");
+    }
+    if (testCount > 0 && !fileTree.some((f) => f.includes("coverage") || f.includes("lcov"))) {
+      testRecommendations.push("Consider adding code coverage reporting (e.g., `--coverage` flag with Jest/Vitest) to track coverage over time.");
     }
 
-    // Pick a source file to display (prefer the main entry point)
-    const priority = ["src/index", "src/app", "index", "app", "main", "src/main"];
+    // Pick the best source file to display (prefer main entry, then largest file)
+    const priority = ["src/index", "src/app", "index", "app", "main", "src/main", "src/lib", "lib/"];
     let sampleFile = null;
     for (const p of priority) {
       sampleFile = Object.keys(sourceFiles).find((k) => k.includes(p));
       if (sampleFile) break;
     }
-    if (!sampleFile) sampleFile = Object.keys(sourceFiles)[0];
+    // Fall back to the largest file if no priority match
+    if (!sampleFile) {
+      sampleFile = Object.entries(sourceFiles).sort((a, b) => b[1].length - a[1].length)[0]?.[0] || null;
+    }
     const sampleSourceCode = sampleFile ? sourceFiles[sampleFile] || "" : "";
 
-    // Generate a test scaffold based on the sample file
+    // Generate test scaffold for the sample file
     const generatedTestCode = sampleFile
       ? this._generateTestScaffold(sampleFile, sampleSourceCode, testFramework, language)
       : "// No source files available to generate tests for.";
@@ -679,81 +1072,100 @@ ${license ? `\n## License\n\nThis project is licensed under the ${license} Licen
     const fileName = filePath.split("/").pop().replace(/\.(ts|tsx|js|jsx)$/, "");
     const isTs = filePath.endsWith(".ts") || filePath.endsWith(".tsx");
 
-    // Extract exported function names from the file
+    // Extract exported function and class names
     const fnRe = /export\s+(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
+    const constRe = /export\s+const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?\(/g;
+    const classRe = /export\s+(?:default\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
     const fns = [];
     let m;
-    while ((m = fnRe.exec(content)) !== null) fns.push(m[1]);
 
-    const constRe = /export\s+const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=/g;
+    while ((m = fnRe.exec(content)) !== null) fns.push({ name: m[1], kind: "function" });
     while ((m = constRe.exec(content)) !== null) {
-      if (!fns.includes(m[1])) fns.push(m[1]);
+      if (!fns.find((f) => f.name === m[1])) fns.push({ name: m[1], kind: "function" });
     }
+    const classes = [];
+    while ((m = classRe.exec(content)) !== null) classes.push(m[1]);
 
     const importPath = `./${fileName}`;
     const isVitest = testFramework.toLowerCase().includes("vitest");
-    const importLine = isVitest
-      ? `import { describe, it, expect } from 'vitest';`
-      : `// Using ${testFramework || "Jest"}`;
+    const testImport = isVitest
+      ? `import { describe, it, expect, vi } from 'vitest';`
+      : `// Using ${testFramework || "Jest"} (globals enabled via config)`;
 
-    if (fns.length === 0) {
-      return `${importLine}
-import * as module from '${importPath}';
+    if (fns.length === 0 && classes.length === 0) {
+      return `${testImport}
+import * as ${fileName}Module from '${importPath}';
 
 describe('${fileName}', () => {
-  it('should be importable', () => {
-    expect(module).toBeDefined();
+  it('module should be importable and defined', () => {
+    expect(${fileName}Module).toBeDefined();
   });
 
   // TODO: Add specific tests for exported functions/classes
 });`;
     }
 
-    const testCases = fns.slice(0, 5).map((fn) => `
-  describe('${fn}', () => {
-    it('should be defined', () => {
-      expect(${fn}).toBeDefined();
-    });
-
-    it('should handle valid input', () => {
-      // TODO: Replace with real arguments for ${fn}
-      // const result = ${fn}(/* args */);
-      // expect(result).toBeDefined();
-    });
-
-    it('should handle edge cases', () => {
-      // TODO: Test null, undefined, empty inputs
+    const classTests = classes.slice(0, 2).map((cls) => `
+  describe('${cls}', () => {
+    it('should instantiate without errors', () => {
+      // const instance = new ${cls}(/* args */);
+      // expect(instance).toBeInstanceOf(${cls});
     });
   });`).join("\n");
 
-    return `${importLine}
-import { ${fns.slice(0, 5).join(", ")} } from '${importPath}';
+    const fnTests = fns.slice(0, 5).map(({ name }) => `
+  describe('${name}', () => {
+    it('should be defined', () => {
+      expect(${name}).toBeDefined();
+    });
+
+    it('should return a defined value for valid input', async () => {
+      // TODO: Replace with real arguments for ${name}
+      // const result = await ${name}(/* args */);
+      // expect(result).toBeDefined();
+    });
+
+    it('should handle edge cases gracefully', () => {
+      // TODO: Test null, undefined, empty, and boundary inputs
+    });
+  });`).join("\n");
+
+    const importNames = [
+      ...fns.slice(0, 5).map((f) => f.name),
+      ...classes.slice(0, 2),
+    ].join(", ");
+
+    return `${testImport}
+import { ${importNames} } from '${importPath}';
 
 describe('${fileName}', () => {
-${testCases}
+${classTests}
+${fnTests}
 });`;
   }
 
   // ─── Action plan ──────────────────────────────────────────────────────────
 
-  _buildActionPlan(criticalIssues, warnings, depOutdated, testFiles, readme, envVars, pkg) {
+  _buildActionPlan(criticalIssues, warnings, depOutdated, testFiles, readme, envVars, pkg, fileTree) {
     const plan = [];
+    const all = pkg ? { ...pkg.dependencies, ...pkg.devDependencies } : {};
 
     if (criticalIssues > 0) {
       plan.push({
         priority: "high",
         title: "Resolve security vulnerabilities",
-        reason: `${criticalIssues} dependency with known security advisories was found.`,
-        recommendation: "Run `npm audit fix` to automatically fix resolvable issues, then manually review any remaining advisories.",
+        reason: `${criticalIssues} dependency with known security advisories was detected.`,
+        recommendation: "Run `npm audit fix` to automatically fix resolvable issues. Review any remaining advisories manually and upgrade packages to their patched versions.",
       });
     }
 
     if (Object.keys(testFiles).length === 0) {
+      const suggestedFramework = all.vitest ? "Vitest" : all.jest ? "Jest" : "Vitest";
       plan.push({
         priority: "high",
         title: "Add automated tests",
         reason: "No test files were found in the repository.",
-        recommendation: "Set up Jest or Vitest and write unit tests for all core business logic. Aim for at least 60% coverage.",
+        recommendation: `Set up ${suggestedFramework} and write unit tests for all core business logic. Aim for at least 60% coverage on critical paths.`,
       });
     }
 
@@ -761,35 +1173,50 @@ ${testCases}
       plan.push({
         priority: "medium",
         title: "Improve README documentation",
-        reason: "The README is missing or very short.",
-        recommendation: "Add a clear description, installation steps, usage examples, and contribution guidelines.",
+        reason: !readme ? "The README.md is missing." : "The README is too short and lacks meaningful content.",
+        recommendation: "Add a clear project description, installation steps, usage examples, screenshots or a live demo link, and contribution guidelines.",
       });
     }
 
     if (depOutdated.length > 0) {
       plan.push({
         priority: "medium",
-        title: `Update ${depOutdated.length} outdated dependencies`,
-        reason: `${depOutdated.map((d) => d.pkg).join(", ")} are behind their latest major versions.`,
-        recommendation: "Run `npm outdated` to see all outdated packages. Update incrementally, testing after each major update.",
+        title: `Update ${depOutdated.length} outdated ${depOutdated.length === 1 ? "dependency" : "dependencies"}`,
+        reason: `${depOutdated.map((d) => `${d.pkg} (${d.current} → ${d.latest})`).join(", ")}.`,
+        recommendation: "Run `npm outdated` to review all outdated packages. Update one major version at a time and run tests after each upgrade to catch breaking changes.",
       });
     }
 
-    if (envVars.length > 0 && !Object.keys(pkg?.devDependencies || {}).some((d) => d.includes("dotenv"))) {
+    if (envVars.length > 0) {
+      const hasEnvExample = pkg
+        ? Object.keys({ ...pkg.dependencies, ...pkg.devDependencies }).includes("dotenv") ||
+          fileTree.some((f) => f.includes(".env.example"))
+        : false;
+      if (!hasEnvExample) {
+        plan.push({
+          priority: "low",
+          title: "Create .env.example file",
+          reason: `${envVars.length} environment variable(s) detected but no .env.example file found.`,
+          recommendation: "Create a `.env.example` file listing all required environment variables with placeholder values. This helps onboard new contributors quickly.",
+        });
+      }
+    }
+
+    if (!fileTree.some((f) => f.includes(".github/workflows") || f.includes("ci.yml") || f.includes("ci.yaml"))) {
       plan.push({
         priority: "low",
-        title: "Document environment variables",
-        reason: `${envVars.length} environment variables detected. Ensure they are documented.`,
-        recommendation: "Maintain a `.env.example` file with all required variables and their expected format.",
+        title: "Set up continuous integration",
+        reason: "No CI/CD configuration was found in the repository.",
+        recommendation: "Add a GitHub Actions workflow at `.github/workflows/ci.yml` to run lint, type-check, and tests on every pull request. This prevents regressions and enforces quality.",
       });
     }
 
     if (plan.length < 3) {
       plan.push({
         priority: "low",
-        title: "Set up continuous integration",
-        reason: "Automated CI ensures code quality is maintained as the project grows.",
-        recommendation: "Add a GitHub Actions workflow (`/.github/workflows/ci.yml`) that runs lint, typecheck, and tests on every pull request.",
+        title: "Add TypeScript strict mode",
+        reason: "Stricter TypeScript settings help catch bugs earlier and improve code quality.",
+        recommendation: 'Enable `"strict": true` in `tsconfig.json` and gradually fix type errors. Pay particular attention to `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`.',
       });
     }
 
@@ -798,15 +1225,48 @@ ${testCases}
 
   // ─── Overview summary ─────────────────────────────────────────────────────
 
-  _buildSummary(name, metadata, language, framework, pkg, fileTree) {
-    const desc = metadata?.description;
-    if (desc && desc.length > 30) {
-      return `${name} is a ${language} project using ${framework}. ${desc} The repository contains ${fileTree.length} files.`;
-    }
-    const testCount = fileTree.filter((f) => f.includes(".test.") || f.includes(".spec.")).length;
+  _buildSummary(name, metadata, language, framework, pkg, fileTree, readme, stack) {
+    // Primary: use GitHub description
+    const ghDesc = metadata?.description;
+
+    // Secondary: extract first meaningful paragraph from readme
+    const readmeDesc = readme ? this._extractDescription(readme) : null;
+
+    // Count meaningful signals
     const depsCount = Object.keys(pkg?.dependencies || {}).length;
-    return `${name} is a ${language} application built with ${framework}. ` +
-      `It has ${fileTree.length} files${depsCount > 0 ? `, ${depsCount} production dependencies` : ""}` +
-      `${testCount > 0 ? `, and ${testCount} test file(s)` : " with no tests detected"}.`;
+    const testCount = fileTree.filter((f) => f.includes(".test.") || f.includes(".spec.")).length;
+    const hasCI = fileTree.some((f) => f.includes(".github/workflows"));
+    const stars = metadata?.stars;
+    const liveUrl = metadata?.githubSlug ? `https://github.com/${metadata.githubSlug}` : null;
+
+    let summary = "";
+
+    if (ghDesc && ghDesc.length > 20) {
+      summary = `${name} is a ${language} project built with ${framework}. ${ghDesc}`;
+    } else if (readmeDesc && readmeDesc.length > 30) {
+      summary = `${name} is a ${language} application using ${framework}. ${readmeDesc}`;
+    } else {
+      summary = `${name} is a ${language} application built with ${framework}.`;
+    }
+
+    // Add stack highlights
+    const notableStack = stack.filter((s) => !["TypeScript", "JavaScript", language, framework].includes(s)).slice(0, 3);
+    if (notableStack.length > 0) {
+      summary += ` It uses ${notableStack.join(", ")}.`;
+    }
+
+    // Add health signals
+    const signals = [];
+    if (depsCount > 0) signals.push(`${depsCount} production dependencies`);
+    if (testCount > 0) signals.push(`${testCount} test file(s)`);
+    else signals.push("no automated tests");
+    if (hasCI) signals.push("CI/CD configured");
+    if (stars != null && stars > 0) signals.push(`${stars} GitHub stars`);
+
+    if (signals.length > 0) {
+      summary += ` The repository has ${signals.join(", ")}.`;
+    }
+
+    return summary;
   }
 }
