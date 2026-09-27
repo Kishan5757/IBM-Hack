@@ -213,29 +213,44 @@ export class RuleBasedProvider {
     const monorepoServices = metadata?.monorepoServices || this._inferMonorepoServices(fileTree, configurationFiles);
 
     // ── 1. Language & framework detection ───────────────────────────────────
-    const language = this._detectLanguage(pkg, fileTree, metadata);
-    const { framework, stack } = this._detectFramework(pkg, fileTree, configurationFiles, language, isMonorepo, monorepoServices);
-    const testFramework = this._detectTestFramework(pkg, fileTree);
+    let language = "Unknown", framework = "Unknown", stack = [];
+    try {
+      language = this._detectLanguage(pkg, fileTree, metadata);
+      ({ framework, stack } = this._detectFramework(pkg, fileTree, configurationFiles, language, isMonorepo, monorepoServices));
+    } catch (e) { console.error("[RuleBasedProvider] detect lang/fw:", e?.message); }
+
+    let testFramework = "None detected";
+    try { testFramework = this._detectTestFramework(pkg, fileTree); } catch (e) { console.error("[RuleBasedProvider] detectTestFw:", e?.message); }
 
     // ── 2. Dependency analysis ───────────────────────────────────────────────
-    const { depNodes, depAlerts, depOutdated } = this._analyzeDependencies(pkg, repositoryName, configurationFiles, isMonorepo);
+    let depNodes = [{ id: "root", label: repositoryName, type: "root", health: "ok" }], depAlerts = [], depOutdated = [];
+    try { ({ depNodes, depAlerts, depOutdated } = this._analyzeDependencies(pkg, repositoryName, configurationFiles, isMonorepo)); } catch (e) { console.error("[RuleBasedProvider] analyzeDeps:", e?.message); }
 
     // ── 3. Environment variables ─────────────────────────────────────────────
-    const envVars = this._extractEnvVars(sourceFiles, configurationFiles);
+    let envVars = [];
+    try { envVars = this._extractEnvVars(sourceFiles, configurationFiles); } catch (e) { console.error("[RuleBasedProvider] extractEnvVars:", e?.message); }
 
     // ── 4. Setup steps ───────────────────────────────────────────────────────
-    const setupSteps = this._buildSetupSteps(pkg, repositoryName, configurationFiles, language, framework, metadata, isMonorepo, monorepoServices, fileTree);
+    let setupSteps = [];
+    try { setupSteps = this._buildSetupSteps(pkg, repositoryName, configurationFiles, language, framework, metadata, isMonorepo, monorepoServices, fileTree); } catch (e) { console.error("[RuleBasedProvider] buildSetupSteps:", e?.message); }
 
     // ── 5. README quality ────────────────────────────────────────────────────
-    const { qualityScore, missingSections, readmeIssues } = this._scoreReadme(readme);
-    const generatedMarkdown = this._generateReadme(repositoryName, metadata, pkg, language, framework, stack, setupSteps, envVars, fileTree, readme);
+    let qualityScore = 0, missingSections = [], readmeIssues = [];
+    try { ({ qualityScore, missingSections, readmeIssues } = this._scoreReadme(readme)); } catch (e) { console.error("[RuleBasedProvider] scoreReadme:", e?.message); }
+
+    let generatedMarkdown = `# ${repositoryName}\n\nRepository analysis complete.`;
+    try { generatedMarkdown = this._generateReadme(repositoryName, metadata, pkg, language, framework, stack, setupSteps, envVars, fileTree, readme); } catch (e) { console.error("[RuleBasedProvider] generateReadme:", e?.message); }
 
     // ── 6. Dead code detection ───────────────────────────────────────────────
-    const deadCode = this._detectDeadCode(sourceFiles, fileTree);
+    let deadCode = [];
+    try { deadCode = this._detectDeadCode(sourceFiles, fileTree); } catch (e) { console.error("[RuleBasedProvider] detectDeadCode:", e?.message); }
 
     // ── 7. Test analysis ─────────────────────────────────────────────────────
-    const { testStats, missingTests, testRecommendations, sampleSourceCode, generatedTestCode } =
-      this._analyzeTests(testFramework, testFiles, sourceFiles, fileTree, language);
+    let testStats = [], missingTests = [], testRecommendations = [], sampleSourceCode = "", generatedTestCode = "";
+    try {
+      ({ testStats, missingTests, testRecommendations, sampleSourceCode, generatedTestCode } =
+        this._analyzeTests(testFramework, testFiles, sourceFiles, fileTree, language));
+    } catch (e) { console.error("[RuleBasedProvider] analyzeTests:", e?.message); }
 
     // ── 8. Health scoring ────────────────────────────────────────────────────
     const criticalIssues = depAlerts.filter((a) => a.severity === "CRITICAL").length;
@@ -247,10 +262,12 @@ export class RuleBasedProvider {
     const healthScore = Math.max(10, Math.min(100, 100 - criticalIssues * 15 - warnings * 5));
 
     // ── 9. Action plan ───────────────────────────────────────────────────────
-    const actionPlan = this._buildActionPlan(criticalIssues, warnings, depOutdated, testFiles, readme, envVars, pkg, fileTree, language);
+    let actionPlan = [];
+    try { actionPlan = this._buildActionPlan(criticalIssues, warnings, depOutdated, testFiles, readme, envVars, pkg, fileTree, language); } catch (e) { console.error("[RuleBasedProvider] buildActionPlan:", e?.message); }
 
     // ── 10. Overview summary ─────────────────────────────────────────────────
-    const summary = this._buildSummary(repositoryName, metadata, language, framework, pkg, fileTree, readme, stack);
+    let summary = `${repositoryName} repository analysis.`;
+    try { summary = this._buildSummary(repositoryName, metadata, language, framework, pkg, fileTree, readme, stack); } catch (e) { console.error("[RuleBasedProvider] buildSummary:", e?.message); }
 
     // ── 11. Setup status ─────────────────────────────────────────────────────
     const setupStatus = criticalIssues > 0 ? "critical" : warnings > 2 ? "warning" : "healthy";
@@ -1517,22 +1534,44 @@ ${licenseSection}
     const items = [];
     let id = 0;
 
-    // Collect all exports and imports across files
-    const allExports = new Map(); // symbol → { file, line, type }
-    const allImports = new Set(); // all imported symbol names (across all files)
+    // Only run JS/TS dead-code analysis — C++, HTML, Python etc. use different paradigms
+    const JS_TS_EXT = /\.(js|jsx|ts|tsx|mjs|cjs)$/i;
+    const jsFiles = Object.entries(sourceFiles).filter(([p]) => JS_TS_EXT.test(p));
 
-    // Regex patterns
-    const exportFnRe = /export\s+(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
+    if (jsFiles.length === 0) {
+      // For non-JS repos just flag large files as refactor hints
+      for (const [path, content] of Object.entries(sourceFiles)) {
+        const lineCount = (content || "").split("\n").length;
+        if (lineCount > 400) {
+          items.push({
+            id: `dc-large-${id++}`,
+            name: path.split("/").pop(),
+            type: "Orphan File",
+            file: path,
+            line: null,
+            severity: "low",
+            confidence: 40,
+            reason: `File has ${lineCount} lines — consider splitting into smaller modules.`,
+            evidence: [`${lineCount} lines in ${path}`],
+          });
+        }
+        if (items.length >= 6) break;
+      }
+      return items;
+    }
+
+    // ── JS/TS analysis ────────────────────────────────────────────────────────
+    const allExports = new Map();
+    const allImports = new Set();
+
+    const exportFnRe    = /export\s+(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
     const exportConstRe = /export\s+const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=/g;
     const exportClassRe = /export\s+class\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
-    const exportTypeRe = /export\s+(?:type|interface|enum)\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
+    const exportTypeRe  = /export\s+(?:type|interface|enum)\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
     const namedImportRe = /import\s+\{([^}]+)\}\s+from/g;
     const defaultImportRe = /import\s+([A-Za-z_$][A-Za-z0-9_$]*)\s+from/g;
 
-    for (const [path, content] of Object.entries(sourceFiles)) {
-      const lines = content.split("\n");
-
-      // Collect exports
+    for (const [path, content] of jsFiles) {
       for (const [re, symbolType] of [
         [exportFnRe, "Unused Function"],
         [exportConstRe, "Unused Variable"],
@@ -1546,24 +1585,19 @@ ${licenseSection}
           allExports.set(m[1], { file: path, line: lineIdx + 1, symbolType });
         }
       }
-
-      // Collect named imports
       namedImportRe.lastIndex = 0;
+      defaultImportRe.lastIndex = 0;
       let m;
       while ((m = namedImportRe.exec(content)) !== null) {
         for (const sym of m[1].split(",").map((s) => s.trim().split(/\s+as\s+/)[0].trim())) {
           if (sym) allImports.add(sym);
         }
       }
-
-      // Collect default imports
-      defaultImportRe.lastIndex = 0;
       while ((m = defaultImportRe.exec(content)) !== null) {
         allImports.add(m[1]);
       }
     }
 
-    // Flag exported symbols that are never imported
     const ENTRY_POINT_SKIP = /^(App|Page|Layout|main|index|default|handler|GET|POST|PUT|DELETE|HEAD|PATCH|OPTIONS|middleware|config|metadata|generateMetadata|generateStaticParams|loader|action|ErrorBoundary|CatchBoundary)$/;
     for (const [sym, { file, line, symbolType }] of allExports.entries()) {
       if (!allImports.has(sym) && sym !== "default" && !ENTRY_POINT_SKIP.test(sym)) {
@@ -1582,9 +1616,9 @@ ${licenseSection}
       }
     }
 
-    // Flag large files as refactor candidates
-    for (const [path, content] of Object.entries(sourceFiles)) {
-      const lineCount = content.split("\n").length;
+    // Flag large JS/TS files
+    for (const [path, content] of jsFiles) {
+      const lineCount = (content || "").split("\n").length;
       if (lineCount > 500) {
         items.push({
           id: `dc-large-${id++}`,
@@ -1600,17 +1634,19 @@ ${licenseSection}
       }
     }
 
-    // Flag unused imports within individual files
-    const unusedImportRe = /import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]/g;
-    for (const [path, content] of Object.entries(sourceFiles)) {
+    // Flag unused imports — create a fresh regex per file to avoid lastIndex bugs
+    for (const [path, content] of jsFiles) {
       if (items.length >= 12) break;
-      unusedImportRe.lastIndex = 0;
+      const unusedImportRe = /import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]/g;
       let m;
       while ((m = unusedImportRe.exec(content)) !== null) {
-        const importedNames = m[1].split(",").map((s) => s.trim().split(/\s+as\s+/).pop()?.trim()).filter(Boolean);
+        const importedNames = m[1].split(",")
+          .map((s) => s.trim().split(/\s+as\s+/).pop()?.trim())
+          .filter(Boolean);
         for (const imported of importedNames) {
-          // Check if used beyond the import line itself
-          const usageCount = (content.match(new RegExp(`\\b${imported}\\b`, "g")) || []).length;
+          // Escape special regex chars in the identifier before building a RegExp
+          const escaped = imported.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const usageCount = (content.match(new RegExp(`\\b${escaped}\\b`, "g")) || []).length;
           if (usageCount === 1 && !imported.startsWith("_")) {
             const lineIdx = content.slice(0, m.index).split("\n").length;
             items.push({
@@ -1743,9 +1779,16 @@ ${licenseSection}
   // ─── Test scaffold generation ─────────────────────────────────────────────
 
   _generateTestScaffold(filePath, content, testFramework, language) {
-    const fileName = filePath.split("/").pop().replace(/\.(ts|tsx|js|jsx)$/, "");
+    // Strip any known source extension — works for .cpp, .c, .html, .py, .go, .ts, .js etc.
+    const fileName = filePath.split("/").pop().replace(/\.[a-zA-Z0-9]+$/, "");
     const isTs = filePath.endsWith(".ts") || filePath.endsWith(".tsx");
     const lang = (language || "").toLowerCase();
+
+    // ── Non-JS/TS fallback — return a language-appropriate scaffold hint ───────
+    const NON_JS_EXTS = /\.(cpp|cc|cxx|c|h|hpp|html|css|scss|lua|sql|sh|bash|r|sql)$/i;
+    if (NON_JS_EXTS.test(filePath) && lang !== "python" && lang !== "go" && lang !== "rust") {
+      return `// No automated test scaffold available for ${lang || filePath.split(".").pop()} files.\n// Consider using a language-appropriate testing framework:\n//   C/C++  → Google Test, Catch2, or doctest\n//   HTML   → Playwright, Cypress, or manual browser testing\n//   Lua    → busted\n//   SQL    → pgTAP or db-migrate test helpers`;
+    }
 
     // ── Python scaffold ────────────────────────────────────────────────────
     if (lang === "python" || filePath.endsWith(".py")) {
