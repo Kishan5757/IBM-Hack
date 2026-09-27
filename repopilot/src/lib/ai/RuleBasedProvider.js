@@ -60,9 +60,13 @@ const LANGUAGE_BY_EXT = {
   js: "JavaScript", jsx: "JavaScript", mjs: "JavaScript", cjs: "JavaScript",
   py: "Python", rb: "Ruby", go: "Go", rs: "Rust",
   java: "Java", kt: "Kotlin", cs: "C#",
-  cpp: "C++", c: "C", php: "PHP", swift: "Swift",
+  cpp: "C++", cc: "C++", cxx: "C++", c: "C", h: "C/C++", hpp: "C++",
+  php: "PHP", swift: "Swift",
   scala: "Scala", clj: "Clojure",
   dart: "Dart", lua: "Lua", r: "R",
+  html: "HTML", css: "CSS", scss: "CSS", sass: "CSS",
+  sh: "Shell", bash: "Shell", ps1: "PowerShell",
+  sql: "SQL",
 };
 
 // Known vulnerability patterns: { pkg, versionRe, severity, advisory }
@@ -154,7 +158,7 @@ export class RuleBasedProvider {
     const envVars = this._extractEnvVars(sourceFiles, configurationFiles);
 
     // ── 4. Setup steps ───────────────────────────────────────────────────────
-    const setupSteps = this._buildSetupSteps(pkg, repositoryName, configurationFiles, language, framework, metadata, isMonorepo, monorepoServices);
+    const setupSteps = this._buildSetupSteps(pkg, repositoryName, configurationFiles, language, framework, metadata, isMonorepo, monorepoServices, fileTree);
 
     // ── 5. README quality ────────────────────────────────────────────────────
     const { qualityScore, missingSections, readmeIssues } = this._scoreReadme(readme);
@@ -457,21 +461,24 @@ export class RuleBasedProvider {
         if (rule.test(pkg)) return rule.name;
       }
     }
-    // Python test frameworks — infer from file tree patterns
-    // Matches: test_*.py, *_test.py, tests.py, test.py
+    // Python test frameworks
     if (fileTree.some((f) => /(?:^|\/)(test_[^/]+|[^/]+_test|tests?)\.(py)$/.test(f))) {
       if (fileTree.some((f) => f.includes("conftest.py") || f.includes("pytest"))) return "pytest";
       return "pytest (inferred)";
     }
     // Go tests
     if (fileTree.some((f) => /_test\.go$/.test(f))) return "Go testing";
-    // Rust tests
-    if (fileTree.some((f) => /\.rs$/.test(f))) {
-      // Rust tests are usually inline; if there are .rs files, testing framework is built-in
-      return "Rust cargo test";
-    }
+    // Rust tests — inline #[test] blocks; cargo test is the runner
+    if (fileTree.some((f) => /\.rs$/.test(f))) return "Rust cargo test";
     // Java tests
     if (fileTree.some((f) => /Test\.java$|Tests\.java$/.test(f))) return "JUnit";
+    // C++ test frameworks
+    if (fileTree.some((f) => /test[_-].*\.(cpp|cc|cxx)$|.*[_-]test\.(cpp|cc|cxx)$/i.test(f))) {
+      if (fileTree.some((f) => /gtest|googletest/i.test(f))) return "Google Test";
+      if (fileTree.some((f) => /catch2|catch\.hpp/i.test(f))) return "Catch2";
+      if (fileTree.some((f) => /doctest/i.test(f))) return "doctest";
+      return "C++ unit tests (inferred)";
+    }
     // Infer from JS/TS file patterns
     const testExts = fileTree.filter((f) => f.includes(".test.") || f.includes(".spec."));
     if (testExts.length > 0) {
@@ -479,6 +486,8 @@ export class RuleBasedProvider {
       if (fileTree.some((f) => f.includes("playwright"))) return "Playwright";
       return "Jest (inferred)";
     }
+    // HTML/browser game — no conventional test framework is the norm
+    if (fileTree.some((f) => /\.html$/.test(f)) && !pkg) return "None (browser app)";
     return "None detected";
   }
 
@@ -495,6 +504,10 @@ export class RuleBasedProvider {
 
     if (!pkg) {
       // Pure non-JS project — non-JS deps already added above
+      // For C/C++ projects parse CMakeLists.txt and Makefile for library hints
+      this._parseCppDeps(configFiles, sourceFiles, fileTree, depNodes);
+      // For HTML/CSS web projects scan for CDN script tags
+      this._parseHtmlDeps(configFiles, sourceFiles, depNodes);
       return { depNodes, depAlerts, depOutdated };
     }
 
@@ -619,6 +632,125 @@ export class RuleBasedProvider {
     }
   }
 
+  /**
+   * Parse C/C++ project dependencies from CMakeLists.txt, Makefile, vcpkg.json,
+   * and #include directives in source files.
+   */
+  _parseCppDeps(configFiles, sourceFiles, fileTree, depNodes) {
+    const existingIds = new Set(depNodes.map((n) => n.id));
+    const addDep = (id, label) => {
+      if (!existingIds.has(id)) {
+        depNodes.push({ id, label, type: "dep", health: "ok" });
+        existingIds.add(id);
+      }
+    };
+
+    // vcpkg.json — {"dependencies": ["sdl2", "openssl"]}
+    const vcpkg = configFiles["vcpkg.json"] || configFiles["vcpkg.json"];
+    if (vcpkg) {
+      try {
+        const parsed = typeof vcpkg === "object" ? vcpkg : JSON.parse(vcpkg);
+        for (const dep of parsed.dependencies || []) {
+          const name = typeof dep === "string" ? dep : dep.name;
+          if (name) addDep(name, name);
+        }
+      } catch { /* ignore parse errors */ }
+    }
+
+    // CMakeLists.txt — find_package(SDL2 REQUIRED), target_link_libraries, pkg_check_modules
+    const cmake = configFiles["CMakeLists.txt"] || "";
+    if (cmake) {
+      const findPkg = /find_package\(\s*([A-Za-z0-9_]+)/gi;
+      const pkgCheck = /pkg_check_modules\([^)]*\s+([A-Za-z0-9_-]+)/gi;
+      const targetLink = /target_link_libraries\([^)]+\s+([A-Za-z0-9_:]+)\)/gi;
+      let m;
+      while ((m = findPkg.exec(cmake)) !== null) {
+        const name = m[1];
+        if (!["REQUIRED", "COMPONENTS", "CONFIG", "NO_MODULE", "CMAKE"].includes(name.toUpperCase()))
+          addDep(name.toLowerCase(), name);
+      }
+      while ((m = pkgCheck.exec(cmake)) !== null) addDep(m[1].toLowerCase(), m[1]);
+      while ((m = targetLink.exec(cmake)) !== null) {
+        const lib = m[1].split("::")[0].toLowerCase();
+        if (!["target", "project", "main", "public", "private", "interface"].includes(lib))
+          addDep(lib, lib);
+      }
+    }
+
+    // Makefile — -l<lib> linker flags
+    const makefile = configFiles["Makefile"] || configFiles["makefile"] || "";
+    if (makefile) {
+      const linkRe = /-l([A-Za-z0-9_]+)/g;
+      let m;
+      while ((m = linkRe.exec(makefile)) !== null) addDep(m[1], `lib${m[1]}`);
+    }
+
+    // Scan #include <header.h> in source files for well-known libraries
+    const KNOWN_HEADERS = {
+      "SDL.h": "SDL2", "SDL2/SDL.h": "SDL2", "SFML/Graphics.hpp": "SFML",
+      "SFML/Window.hpp": "SFML", "SFML/Audio.hpp": "SFML",
+      "raylib.h": "raylib", "glad/glad.h": "GLAD/OpenGL", "GL/glew.h": "GLEW",
+      "GL/gl.h": "OpenGL", "GLFW/glfw3.h": "GLFW", "glm/glm.hpp": "GLM",
+      "Box2D/Box2D.h": "Box2D", "bullet/btBulletDynamicsCommon.h": "Bullet Physics",
+      "nlohmann/json.hpp": "nlohmann/json", "boost/asio.hpp": "Boost.Asio",
+      "openssl/ssl.h": "OpenSSL", "curl/curl.h": "libcurl",
+      "imgui.h": "Dear ImGui", "vulkan/vulkan.h": "Vulkan",
+    };
+    const includeRe = /#include\s+[<"]([^>"]+)[>"]/g;
+    const allSrc = Object.values(sourceFiles).join("\n").slice(0, 200_000);
+    let m2;
+    const seenHeaders = new Set();
+    while ((m2 = includeRe.exec(allSrc)) !== null) {
+      const header = m2[1];
+      if (seenHeaders.has(header)) continue;
+      seenHeaders.add(header);
+      if (KNOWN_HEADERS[header]) addDep(KNOWN_HEADERS[header].toLowerCase().replace(/\s/g, "-"), KNOWN_HEADERS[header]);
+    }
+  }
+
+  /**
+   * Parse HTML/CSS/JS web projects for CDN script/link tags and inline deps.
+   */
+  _parseHtmlDeps(configFiles, sourceFiles, depNodes) {
+    const existingIds = new Set(depNodes.map((n) => n.id));
+    const addDep = (id, label, version = "*") => {
+      if (!existingIds.has(id)) {
+        depNodes.push({ id, label: `${label}@${version}`, type: "dep", health: "ok" });
+        existingIds.add(id);
+      }
+    };
+
+    // Well-known CDN libraries by hostname/path pattern
+    const CDN_PATTERNS = [
+      { re: /jquery[.-]([\d.]+)(?:\.min)?\.js/i, name: "jQuery" },
+      { re: /bootstrap[.-]([\d.]+)(?:\.min)?\.(?:js|css)/i, name: "Bootstrap" },
+      { re: /react(?:\.development|\.production\.min)?\.js/i, name: "React" },
+      { re: /vue(?:@([\d.]+))?(?:\.min)?\.js/i, name: "Vue.js" },
+      { re: /three(?:\.min)?\.js/i, name: "Three.js" },
+      { re: /pixi(?:\.min)?\.js/i, name: "PixiJS" },
+      { re: /phaser(?:[.-]([\d.]+))?(?:\.min)?\.js/i, name: "Phaser" },
+      { re: /babylon(?:\.min)?\.js/i, name: "Babylon.js" },
+      { re: /tailwindcss/i, name: "Tailwind CSS" },
+      { re: /animate\.css/i, name: "Animate.css" },
+      { re: /font-awesome/i, name: "Font Awesome" },
+      { re: /socket\.io/i, name: "Socket.IO" },
+      { re: /axios(?:\.min)?\.js/i, name: "Axios" },
+      { re: /lodash(?:\.min)?\.js/i, name: "Lodash" },
+      { re: /d3(?:\.min)?\.js/i, name: "D3.js" },
+      { re: /gsap(?:\.min)?\.js/i, name: "GSAP" },
+    ];
+
+    const allContent = [
+      ...Object.values(configFiles),
+      ...Object.values(sourceFiles),
+    ].join("\n").slice(0, 300_000);
+
+    for (const { re, name } of CDN_PATTERNS) {
+      const m = re.exec(allContent);
+      if (m) addDep(name.toLowerCase().replace(/\s/g, "-"), name, m[1] || "*");
+    }
+  }
+
   // ─── Environment variable extraction ──────────────────────────────────────
 
   _extractEnvVars(sourceFiles, configFiles) {
@@ -663,7 +795,7 @@ export class RuleBasedProvider {
 
   // ─── Setup steps ──────────────────────────────────────────────────────────
 
-  _buildSetupSteps(pkg, repoName, configFiles, language, framework, metadata, isMonorepo = false, monorepoServices = []) {
+  _buildSetupSteps(pkg, repoName, configFiles, language, framework, metadata, isMonorepo = false, monorepoServices = [], fileTree = []) {
     const steps = [];
     let id = 1;
 
@@ -835,6 +967,30 @@ export class RuleBasedProvider {
         steps.push({ id: id++, title: "Install dependencies", command: "bundle install", description: "Install Ruby gems." });
         if (hasEnvExample) steps.push({ id: id++, title: "Configure environment", command: "cp .env.example .env", description: "Set up environment variables." });
         steps.push({ id: id++, title: "Run the application", command: "rails server", description: "Start the Rails server." });
+      } else if (lang === "c++" || lang === "c" || lang === "c/c++") {
+        const hasCmake = Object.keys(configFiles).some((f) => f.includes("CMakeLists.txt"));
+        const hasMakefile = Object.keys(configFiles).some((f) => f === "Makefile" || f === "makefile");
+        if (hasCmake) {
+          steps.push({ id: id++, title: "Configure with CMake", command: "cmake -B build -DCMAKE_BUILD_TYPE=Release", description: "Generate build files in the build/ directory." });
+          steps.push({ id: id++, title: "Compile the project", command: "cmake --build build --config Release", description: "Compile all source files." });
+          steps.push({ id: id++, title: "Run the application", command: "./build/" + repoName.toLowerCase().replace(/\s/g, "-"), description: "Execute the compiled binary." });
+        } else if (hasMakefile) {
+          steps.push({ id: id++, title: "Build the project", command: "make", description: "Compile using the Makefile." });
+          steps.push({ id: id++, title: "Run the application", command: "./" + repoName.toLowerCase().replace(/\s/g, "-"), description: "Execute the compiled binary." });
+        } else {
+          steps.push({ id: id++, title: "Compile the project", command: `g++ -std=c++17 -o ${repoName.toLowerCase()} *.cpp`, description: "Compile all .cpp files with GCC." });
+          steps.push({ id: id++, title: "Run the application", command: "./" + repoName.toLowerCase().replace(/\s/g, "-"), description: "Execute the compiled binary." });
+        }
+      } else if (lang === "html" || lang === "css") {
+        // Plain HTML/CSS/JS web app — just open the index.html
+        const hasIndex = Object.keys(configFiles).some((f) => f.endsWith("index.html")) ||
+          (fileTree || []).some((f) => f === "index.html" || f.endsWith("/index.html"));
+        if (hasIndex) {
+          steps.push({ id: id++, title: "Open in your browser", command: "open index.html  # or double-click the file", description: "No build step needed — open index.html directly in any modern browser." });
+        } else {
+          steps.push({ id: id++, title: "Open in your browser", command: "open index.html", description: "Open the main HTML file in your browser to run the project." });
+        }
+        steps.push({ id: id++, title: "(Optional) Run a local dev server", command: "npx serve .  # or: python -m http.server 8080", description: "Serve the files locally to avoid CORS issues when loading assets." });
       } else {
         // Truly unknown — give generic helpful steps
         steps.push({ id: id++, title: "Review project documentation", command: "cat README.md", description: "Check the README for language-specific setup instructions." });
@@ -1013,88 +1169,151 @@ export class RuleBasedProvider {
   // ─── README generation ────────────────────────────────────────────────────
 
   _generateReadme(name, metadata, pkg, language, framework, stack, steps, envVars, fileTree, existingReadme) {
-    // Build description — avoid "Unknown" leaking into text
-    const knownFw = framework && framework !== "Unknown" ? framework : null;
-    const knownLang = language && language !== "Unknown" ? language : null;
-    const fallbackDesc = knownFw ? `A ${knownFw} project.` : knownLang ? `A ${knownLang} project.` : "A software project.";
-    const desc = metadata?.description || (existingReadme ? this._extractDescription(existingReadme) : null) || fallbackDesc;
+    // Normalise language/framework — never let "Unknown" appear in output
+    const knownFw   = framework && !["Unknown", "unknown"].includes(framework) ? framework : null;
+    const knownLang = language  && !["Unknown", "unknown"].includes(language)  ? language  : null;
+    const techLabel = knownFw || knownLang || "software";
+
+    // Description: GitHub meta → extracted from existing README → smart fallback
+    const extractedDesc = existingReadme ? this._extractDescription(existingReadme) : null;
+    const fallbackDesc = `A ${techLabel} project.`;
+    const desc = (metadata?.description && metadata.description.trim()) || extractedDesc || fallbackDesc;
+
     const ghSlug = metadata?.githubSlug;
     const version = pkg?.version || null;
-    const hasTests = fileTree.some((f) => f.includes(".test.") || f.includes(".spec.") || f.includes("__tests__"));
-    const license = fileTree.some((f) => f.toLowerCase() === "license" || f.toLowerCase() === "license.md" || f.toLowerCase() === "license.txt") ? "MIT" : null;
 
-    // Badges
-    const badgeBase = ghSlug ? `https://img.shields.io/github` : null;
+    // Detect license file
+    const licenseFile = fileTree.find((f) =>
+      /^license(\.md|\.txt)?$/i.test(f.split("/").pop())
+    );
+    const licenseName = licenseFile ? this._inferLicenseName(fileTree) : null;
+
+    // ── Badges ───────────────────────────────────────────────────────────────
+    const badgeBase = `https://img.shields.io/github`;
     const badges = ghSlug
       ? [
           `[![Stars](${badgeBase}/stars/${ghSlug}?style=flat-square)](https://github.com/${ghSlug})`,
-          hasTests ? `[![Tests](${badgeBase}/actions/workflows/test.yml/badge.svg)](https://github.com/${ghSlug}/actions)` : null,
-          version ? `[![Version](https://img.shields.io/badge/version-${version}-blue?style=flat-square)](https://github.com/${ghSlug})` : null,
+          version && version !== "0.0.0"
+            ? `[![Version](https://img.shields.io/badge/version-${encodeURIComponent(version)}-blue?style=flat-square)](https://github.com/${ghSlug})`
+            : null,
+          licenseName
+            ? `[![License](https://img.shields.io/badge/license-${encodeURIComponent(licenseName)}-green?style=flat-square)](./LICENSE)`
+            : null,
         ].filter(Boolean).join(" ")
       : "";
 
-    // Features — extract from existing readme or build from stack signals
+    // ── Features ─────────────────────────────────────────────────────────────
     const features = this._extractFeatures(existingReadme, pkg, fileTree, stack, framework);
 
-    // Version line
-    const versionLine = version && version !== "0.0.0" ? `\n**Version:** ${version}\n` : "";
+    // ── Prerequisites section ─────────────────────────────────────────────────
+    const prereqs = this._buildPrerequisites(language, framework, pkg);
+    const prereqSection = prereqs.length > 0
+      ? `\n## 📋 Prerequisites\n\n${prereqs.map((p) => `- ${p}`).join("\n")}`
+      : "";
 
-    // Deployment notes
-    const deploySection = this._buildDeploySection(fileTree, pkg, ghSlug, framework);
+    // ── Tech stack section ────────────────────────────────────────────────────
+    const cleanStack = stack.filter((s) => s && !["Unknown", "unknown"].includes(s));
+    const stackSection = cleanStack.length > 0
+      ? `\n## 🚀 Tech Stack\n\n${cleanStack.map((s) => `- **${s}**`).join("\n")}`
+      : knownLang
+      ? `\n## 🚀 Tech Stack\n\n- **${knownLang}**`
+      : "";
 
-    // Environment section
+    // ── Setup steps ──────────────────────────────────────────────────────────
+    const stepsSection = steps.length > 0
+      ? `\n## 🛠️ Getting Started\n\n${steps.map((s) =>
+          `### ${s.title}\n\n\`\`\`bash\n${s.command}\n\`\`\`\n\n${s.description}`
+        ).join("\n\n")}`
+      : `\n## 🛠️ Getting Started\n\n\`\`\`bash\ngit clone https://github.com/${ghSlug || `your-username/${name.toLowerCase()}`}.git\ncd ${name.toLowerCase()}\n# See project documentation for build steps\n\`\`\``;
+
+    // ── Environment variables ─────────────────────────────────────────────────
     const envSection = envVars.length > 0
-      ? `\n## Environment Variables\n\nCopy \`.env.example\` to \`.env\` and configure:\n\n` +
-        `| Variable | Required | Example |\n|---|---|---|\n` +
-        envVars.map((v) => `| \`${v.key}\` | ${v.required ? "Yes" : "No"} | \`${v.example || "your_value_here"}\` |`).join("\n")
+      ? `\n## ⚙️ Environment Variables\n\nCopy \`.env.example\` to \`.env\` and fill in the values:\n\n` +
+        `| Variable | Required | Description |\n|---|---|---|\n` +
+        envVars.map((v) => `| \`${v.key}\` | ${v.required ? "✅ Yes" : "No"} | ${v.example ? `e.g. \`${v.example}\`` : "—"} |`).join("\n")
       : "";
 
-    // Tech stack section
-    const stackSection = stack.length > 0
-      ? `\n## 🚀 Tech Stack\n\n${stack.map((s) => `**${s}**`).join("\n")}`
-      : "";
-
-    // Scripts section
+    // ── Scripts (JS/TS only) ──────────────────────────────────────────────────
     const scriptsSection = pkg?.scripts && Object.keys(pkg.scripts).length > 0
-      ? `\n## Available Scripts\n\n` +
+      ? `\n## 📜 Available Scripts\n\n` +
+        `| Command | Description |\n|---|---|\n` +
         Object.entries(pkg.scripts)
-          .map(([k, v]) => `\`npm run ${k}\` — \`${v}\``)
+          .map(([k, v]) => `| \`npm run ${k}\` | \`${v}\` |`)
           .join("\n")
       : "";
 
-    // Dependencies count
-    const depsCount = Object.keys(pkg?.dependencies || {}).length;
-    const devDepsCount = Object.keys(pkg?.devDependencies || {}).length;
-    const depSection = depsCount > 0
-      ? `\n## Dependencies\n\n${depsCount} production dependencies, ${devDepsCount} dev dependencies. Run \`npm audit\` to check for vulnerabilities.\n`
-      : "";
+    // ── Deployment section ────────────────────────────────────────────────────
+    const deploySection = this._buildDeploySection(fileTree, pkg, ghSlug, framework);
 
-    // About section
-    const aboutSection = metadata?.description
-      ? `\n## About\n\n${metadata.description}\n`
-      : "";
+    // ── Contributing section ──────────────────────────────────────────────────
+    const contributingSection = `\n## 🤝 Contributing\n\nContributions are welcome! Please follow these steps:\n\n1. Fork the repository\n2. Create a feature branch (\`git checkout -b feature/your-feature\`)\n3. Commit your changes (\`git commit -m 'Add some feature'\`)\n4. Push to the branch (\`git push origin feature/your-feature\`)\n5. Open a Pull Request`;
+
+    // ── License ───────────────────────────────────────────────────────────────
+    const licenseSection = licenseName
+      ? `\n## 📄 License\n\nThis project is licensed under the **${licenseName} License** — see the [LICENSE](./LICENSE) file for details.`
+      : `\n## 📄 License\n\nThis project is currently unlicensed. Consider adding a [LICENSE](https://choosealicense.com/) file.`;
 
     return `# ${name}
 
 ${badges}
 
-${desc}
-${versionLine}
-## Getting Started
-${steps.map((s) => `\n### ${s.title}\n\n\`\`\`bash\n${s.command}\n\`\`\`\n\n${s.description}`).join("\n")}
+> ${desc}
+
+${prereqSection}
+${stepsSection}
 ${features ? `\n## ✨ Features\n\n${features}` : ""}
 ${envSection}
 ${stackSection}
 ${scriptsSection}
-${depSection}
 ${deploySection}
-${aboutSection}
-${license ? `## License\n\nThis project is licensed under the ${license} License.` : ""}
+${contributingSection}
+${licenseSection}
 
 ---
 
-*Generated by RepoPilot Rule Engine*
+*Generated by [RepoPilot](https://github.com) — AI-powered repository analysis*
 `.replace(/\n{3,}/g, "\n\n").trim();
+  }
+
+  /** Infer license name from file tree context. */
+  _inferLicenseName(fileTree) {
+    // We can't read the license file contents here, so default to MIT as the most common
+    // A more accurate check would require fetching the file, which is done upstream
+    return "MIT";
+  }
+
+  /** Build a prerequisites list based on the detected language/framework. */
+  _buildPrerequisites(language, framework, pkg) {
+    const prereqs = [];
+    const lang = (language || "").toLowerCase();
+    if (lang === "python") {
+      prereqs.push("Python 3.9+");
+      prereqs.push("pip or [uv](https://github.com/astral-sh/uv)");
+    } else if (lang === "go") {
+      prereqs.push("Go 1.21+");
+    } else if (lang === "rust") {
+      prereqs.push("Rust 1.75+ (install via [rustup](https://rustup.rs))");
+    } else if (lang === "java" || lang === "kotlin") {
+      prereqs.push("Java 17+ (JDK)");
+      if (framework?.includes("Maven")) prereqs.push("Maven 3.8+");
+      else if (framework?.includes("Gradle")) prereqs.push("Gradle 8+");
+    } else if (lang === "dart") {
+      prereqs.push("Flutter SDK 3.0+");
+    } else if (lang === "ruby") {
+      prereqs.push("Ruby 3.0+");
+      prereqs.push("Bundler (`gem install bundler`)");
+    } else if (lang === "c++" || lang === "c") {
+      prereqs.push("C++17-compatible compiler (GCC 9+, Clang 10+, or MSVC 2019+)");
+      if (framework && framework !== lang) prereqs.push(`${framework} SDK`);
+    } else if (lang === "html" || lang === "css") {
+      prereqs.push("A modern web browser (Chrome, Firefox, Safari, or Edge)");
+    } else if (pkg) {
+      // JS/TS project
+      prereqs.push("Node.js 18+ ([nodejs.org](https://nodejs.org))");
+      if (pkg.engines?.node) prereqs.push(`Node.js ${pkg.engines.node} (as specified in package.json)`);
+      if (Object.keys({ ...pkg.devDependencies }).some((d) => d.includes("pnpm"))) prereqs.push("pnpm (`npm install -g pnpm`)");
+    }
+    return prereqs;
   }
 
   /**
@@ -1119,35 +1338,69 @@ ${license ? `## License\n\nThis project is licensed under the ${license} License
    * Extract or synthesize a features list from README and stack signals.
    */
   _extractFeatures(existingReadme, pkg, fileTree, stack, framework) {
-    // Try to extract a "Features" section from the existing README
+    // Try to extract a "Features" section from the existing README first
     if (existingReadme) {
       const featureMatch = existingReadme.match(/#{1,3}\s+(?:✨\s+)?Features?\s*\n([\s\S]*?)(?=\n#{1,3}|\n---|\z)/i);
-      if (featureMatch) return featureMatch[1].trim();
+      if (featureMatch && featureMatch[1].trim().length > 10) return featureMatch[1].trim();
     }
 
-    // Synthesise from stack signals
     const features = [];
     const all = pkg ? { ...pkg.dependencies, ...pkg.devDependencies } : {};
+    const fw = (framework || "").toLowerCase();
+    const treeStr = fileTree.join(" ").toLowerCase();
 
+    // ── JS/TS package-based signals ──────────────────────────────────────────
     if (all["@supabase/supabase-js"]) features.push("🔄 Supabase backend with real-time database and authentication");
     if (all.firebase) features.push("🔥 Firebase integration for real-time data sync");
     if (all["next-auth"] || all["@auth/core"] || all["@clerk/nextjs"]) features.push("🔐 Authentication and session management");
-    if (all["react-leaflet"] || all.leaflet) features.push("🗺️ Interactive maps with Leaflet and OpenStreetMap");
+    if (all["react-leaflet"] || all.leaflet) features.push("🗺️ Interactive maps with Leaflet");
     if (all["@tanstack/react-query"]) features.push("⚡ Optimistic data fetching with TanStack Query");
     if (all.stripe) features.push("💳 Stripe payment integration");
     if (all["socket.io"] || all["socket.io-client"]) features.push("🔌 Real-time communication via Socket.IO");
     if (all["framer-motion"]) features.push("🎨 Smooth animations with Framer Motion");
-    if (all.tailwindcss) features.push("🎨 Responsive UI built with Tailwind CSS");
+    if (all.tailwindcss || all["@tailwindcss/postcss"]) features.push("🎨 Responsive UI built with Tailwind CSS");
     if (all["next-themes"]) features.push("🌙 Dark / Light mode toggle");
-    if (all.graphql) features.push("📊 GraphQL API layer");
-    if (all.prisma) features.push("🗄️ Type-safe database access with Prisma ORM");
-    if (fileTree.some((f) => f.includes(".github/workflows"))) features.push("🤖 Automated CI/CD with GitHub Actions");
+    if (all.graphql || all["@apollo/client"]) features.push("📊 GraphQL API layer");
+    if (all.prisma || all["@prisma/client"]) features.push("🗄️ Type-safe database access with Prisma ORM");
     if (all["react-router-dom"] || all["react-router"]) features.push("🧭 Client-side routing with React Router");
+    if (all.openai || all["@google/genai"] || all["@anthropic-ai/sdk"]) features.push("🤖 AI-powered features via LLM integration");
 
+    // ── File tree signals (language-agnostic) ────────────────────────────────
+    if (treeStr.includes(".github/workflows")) features.push("🤖 Automated CI/CD with GitHub Actions");
+    if (treeStr.includes("dockerfile")) features.push("🐳 Docker containerisation support");
+    if (treeStr.includes("docker-compose")) features.push("🐳 Multi-service orchestration with Docker Compose");
+
+    // ── Non-JS / C++ / game signals ──────────────────────────────────────────
+    if (!pkg) {
+      const hasCpp = fileTree.some((f) => /\.(cpp|cc|cxx|h|hpp)$/.test(f));
+      const hasHtml = fileTree.some((f) => /\.html$/.test(f));
+      const hasCanvas = existingReadme?.toLowerCase().includes("canvas") || treeStr.includes("canvas");
+      const hasGameWords = existingReadme?.match(/game|player|level|score|sprite|render/i);
+
+      if (hasCpp) {
+        features.push("⚡ High-performance native code written in C++");
+        if (treeStr.includes("sfml") || treeStr.includes("sdl") || treeStr.includes("raylib") || treeStr.includes("opengl"))
+          features.push("🎮 Hardware-accelerated graphics with a native game library");
+      }
+      if (hasHtml) {
+        features.push("🌐 Runs directly in the browser — no installation needed");
+        if (hasCanvas || hasGameWords) features.push("🎮 Interactive gameplay using the HTML5 Canvas API");
+        if (treeStr.includes("phaser") || treeStr.includes("pixi") || treeStr.includes("babylon"))
+          features.push("🕹️ Powered by a browser game engine");
+      }
+      if (fw === "python" || fw.includes("django") || fw.includes("flask") || fw.includes("fastapi")) {
+        features.push("🐍 Built with Python for clean, readable backend logic");
+      }
+      if (fw.includes("go") || fw === "go") features.push("🚀 Fast, concurrent server built in Go");
+      if (fw.includes("rust") || fw === "rust") features.push("🦀 Memory-safe systems programming with Rust");
+    }
+
+    // ── Generic fallback (only if still empty) ───────────────────────────────
     if (features.length === 0) {
-      features.push(`Built with ${framework} for a modern development experience`);
+      const label = (framework && !["Unknown", "unknown"].includes(framework)) ? framework : null;
+      if (label) features.push(`Built with **${label}** for a modern development experience`);
+      else features.push("Clean, well-structured codebase ready for extension");
       if (stack.includes("TypeScript")) features.push("Full TypeScript type safety across the codebase");
-      if (stack.includes("Tailwind CSS")) features.push("Responsive, utility-first styling with Tailwind CSS");
     }
 
     return features.map((f) => `- ${f}`).join("\n");

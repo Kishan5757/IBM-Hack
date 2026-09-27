@@ -27,20 +27,23 @@ const EXCLUDED_FILES = new Set([
 const SOURCE_EXTENSIONS = new Set([
   ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
   ".py", ".rb", ".go", ".rs", ".java", ".kt",
-  ".c", ".cpp", ".h", ".hpp", ".cs",
+  ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".cs",
   ".php", ".swift", ".scala", ".clj",
+  ".html", ".css", ".scss", ".sass",
+  ".lua", ".r", ".sql", ".sh", ".bash",
 ]);
 
 const CONFIG_EXTENSIONS = new Set([
   ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg",
   ".env.example", ".env.sample",
   "Dockerfile", "docker-compose.yml", ".dockerignore",
-  ".gitignore", "Makefile", "Procfile",
+  ".gitignore", "Makefile", "makefile", "CMakeLists.txt", "Procfile",
   "tsconfig.json", "next.config.js", "next.config.ts",
   "vite.config.js", "vite.config.ts", "webpack.config.js",
   "babel.config.js", ".babelrc", "eslint.config.js", ".eslintrc",
   "jest.config.js", "jest.config.ts", "vitest.config.ts",
   "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
+  "vcpkg.json", "conanfile.txt", "conanfile.py",
 ]);
 
 const TEST_PATTERNS = [
@@ -636,9 +639,10 @@ function isSourceFile(p) {
 
 function isConfigFile(p) {
   const base = p.split("/").pop();
+  // Exact filename match (e.g. "Makefile", "CMakeLists.txt", "vcpkg.json")
   if (CONFIG_EXTENSIONS.has(base)) return true;
-  const ext = "." + base.split(".").pop();
-  return [".json", ".yaml", ".yml", ".toml", ".cfg", ".ini"].includes(ext.toLowerCase()) &&
+  const ext = "." + base.split(".").pop().toLowerCase();
+  return [".json", ".yaml", ".yml", ".toml", ".cfg", ".ini"].includes(ext) &&
     !isTestFile(p);
 }
 
