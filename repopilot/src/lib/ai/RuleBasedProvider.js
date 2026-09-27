@@ -220,11 +220,11 @@ export class RuleBasedProvider {
     } catch (e) { console.error("[RuleBasedProvider] detect lang/fw:", e?.message); }
 
     let testFramework = "None detected";
-    try { testFramework = this._detectTestFramework(pkg, fileTree); } catch (e) { console.error("[RuleBasedProvider] detectTestFw:", e?.message); }
+    try { testFramework = this._detectTestFramework(pkg, fileTree, configurationFiles); } catch (e) { console.error("[RuleBasedProvider] detectTestFw:", e?.message); }
 
     // ── 2. Dependency analysis ───────────────────────────────────────────────
     let depNodes = [{ id: "root", label: repositoryName, type: "root", health: "ok" }], depAlerts = [], depOutdated = [];
-    try { ({ depNodes, depAlerts, depOutdated } = this._analyzeDependencies(pkg, repositoryName, configurationFiles, isMonorepo)); } catch (e) { console.error("[RuleBasedProvider] analyzeDeps:", e?.message); }
+    try { ({ depNodes, depAlerts, depOutdated } = this._analyzeDependencies(pkg, repositoryName, configurationFiles, isMonorepo, sourceFiles, fileTree)); } catch (e) { console.error("[RuleBasedProvider] analyzeDeps:", e?.message); }
 
     // ── 3. Environment variables ─────────────────────────────────────────────
     let envVars = [];
@@ -538,13 +538,18 @@ export class RuleBasedProvider {
 
   // ─── Test framework detection ──────────────────────────────────────────────
 
-  _detectTestFramework(pkg, fileTree) {
+  _detectTestFramework(pkg, fileTree, configFiles = {}) {
     if (pkg) {
       for (const rule of TEST_FRAMEWORK_RULES) {
         if (rule.test(pkg)) return rule.name;
       }
     }
-    // Python test frameworks
+    // Python test frameworks — check requirements.txt / pyproject.toml for pytest/unittest
+    const reqContent = Object.entries(configFiles)
+      .filter(([k]) => k.endsWith("requirements.txt") || k.endsWith("pyproject.toml"))
+      .map(([, v]) => v || "").join("\n").toLowerCase();
+    if (reqContent.includes("pytest")) return "pytest";
+    if (reqContent.includes("unittest")) return "unittest";
     if (fileTree.some((f) => /(?:^|\/)(test_[^/]+|[^/]+_test|tests?)\.(py)$/.test(f))) {
       if (fileTree.some((f) => f.includes("conftest.py") || f.includes("pytest"))) return "pytest";
       return "pytest (inferred)";
@@ -576,7 +581,7 @@ export class RuleBasedProvider {
 
   // ─── Dependency analysis ───────────────────────────────────────────────────
 
-  _analyzeDependencies(pkg, repoName, configFiles = {}, isMonorepo = false) {
+  _analyzeDependencies(pkg, repoName, configFiles = {}, isMonorepo = false, sourceFiles = {}, fileTree = []) {
     const depNodes = [{ id: "root", label: repoName, type: "root", health: "ok" }];
     const depAlerts = [];
     const depOutdated = [];
@@ -1534,15 +1539,150 @@ ${licenseSection}
     const items = [];
     let id = 0;
 
-    // Only run JS/TS dead-code analysis — C++, HTML, Python etc. use different paradigms
     const JS_TS_EXT = /\.(js|jsx|ts|tsx|mjs|cjs)$/i;
-    const jsFiles = Object.entries(sourceFiles).filter(([p]) => JS_TS_EXT.test(p));
+    const PY_EXT    = /\.py$/i;
+    const jsFiles   = Object.entries(sourceFiles).filter(([p]) => JS_TS_EXT.test(p));
+    const pyFiles   = Object.entries(sourceFiles).filter(([p]) => PY_EXT.test(p));
 
     if (jsFiles.length === 0) {
-      // For non-JS repos just flag large files as refactor hints
+      // ── Python dead-code analysis ───────────────────────────────────────────
+      if (pyFiles.length > 0) {
+        // 1. Collect all top-level function/class names defined across files
+        const allDefinedFns  = new Map(); // name → { file, line }
+        const allDefinedCls  = new Map();
+        const allCalledNames = new Set();
+
+        const fnDefRe  = /^def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/gm;
+        const clsDefRe = /^class\s+([A-Za-z_][A-Za-z0-9_]*)\s*[:(]/gm;
+
+        for (const [path, content] of pyFiles) {
+          let m;
+          fnDefRe.lastIndex = 0;
+          while ((m = fnDefRe.exec(content)) !== null) {
+            if (!allDefinedFns.has(m[1])) {
+              const line = content.slice(0, m.index).split("\n").length;
+              allDefinedFns.set(m[1], { file: path, line });
+            }
+          }
+          clsDefRe.lastIndex = 0;
+          while ((m = clsDefRe.exec(content)) !== null) {
+            if (!allDefinedCls.has(m[1])) {
+              const line = content.slice(0, m.index).split("\n").length;
+              allDefinedCls.set(m[1], { file: path, line });
+            }
+          }
+        }
+
+        // Collect all call-sites (any identifier followed by '(') across all files
+        const callRe = /\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+        for (const [, content] of pyFiles) {
+          let m;
+          callRe.lastIndex = 0;
+          while ((m = callRe.exec(content)) !== null) allCalledNames.add(m[1]);
+        }
+
+        // 2. Flag functions that are never called anywhere in the scanned set
+        const SKIP_PY_FN = /^(main|setUp|tearDown|setUpClass|tearDownClass|__init__|__str__|__repr__|__len__|__iter__|__next__|__enter__|__exit__|__call__|__getitem__|__setitem__|__delitem__|__contains__|run|start|stop|handle|execute|process|get|post|put|delete|patch)$/;
+        for (const [name, { file, line }] of allDefinedFns.entries()) {
+          if (!allCalledNames.has(name) && !SKIP_PY_FN.test(name) && !name.startsWith("_")) {
+            items.push({
+              id: `dc-py-fn-${id++}`,
+              name,
+              type: "Unused Function",
+              file,
+              line,
+              severity: "medium",
+              confidence: 60,
+              reason: `"${name}" is defined but never called in the scanned source files.`,
+              evidence: [`Defined in: ${file}:${line}`],
+            });
+            if (items.length >= 6) break;
+          }
+        }
+
+        // 3. Flag unused imports — `import X` or `from X import Y` where Y never appears again
+        for (const [path, content] of pyFiles) {
+          if (items.length >= 10) break;
+          const lines = content.split("\n");
+          for (let li = 0; li < Math.min(lines.length, 60); li++) {
+            const line = lines[li];
+            // from module import Name1, Name2
+            const fromImportM = line.match(/^\s*from\s+[\w.]+\s+import\s+(.+)$/);
+            if (fromImportM) {
+              const names = fromImportM[1]
+                .split(",")
+                .map((s) => s.trim().replace(/\s+as\s+\w+/, "").trim())
+                .filter((s) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(s));
+              for (const name of names) {
+                const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+                const usageCount = (content.match(new RegExp(`\\b${escaped}\\b`, "g")) || []).length;
+                if (usageCount === 1 && !name.startsWith("_")) {
+                  items.push({
+                    id: `dc-py-import-${id++}`,
+                    name,
+                    type: "Unused Import",
+                    file: path,
+                    line: li + 1,
+                    severity: "low",
+                    confidence: 70,
+                    reason: `"${name}" is imported but never used in ${path.split("/").pop()}.`,
+                    evidence: [`Imported at line ${li + 1} of ${path}`],
+                  });
+                  break; // one per file to keep noise low
+                }
+              }
+            }
+            // import module (bare import never referenced)
+            const bareImportM = line.match(/^\s*import\s+([A-Za-z_][A-Za-z0-9_.]*)\s*(?:as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*$/);
+            if (bareImportM) {
+              const alias = bareImportM[2] || bareImportM[1].split(".")[0];
+              const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+              const usageCount = (content.match(new RegExp(`\\b${escaped}\\b`, "g")) || []).length;
+              if (usageCount === 1) {
+                items.push({
+                  id: `dc-py-bareimport-${id++}`,
+                  name: alias,
+                  type: "Unused Import",
+                  file: path,
+                  line: li + 1,
+                  severity: "low",
+                  confidence: 65,
+                  reason: `"${alias}" is imported but never referenced in ${path.split("/").pop()}.`,
+                  evidence: [`Imported at line ${li + 1} of ${path}`],
+                });
+                break;
+              }
+            }
+            if (items.length >= 10) break;
+          }
+        }
+
+        // 4. Flag large Python files
+        for (const [path, content] of pyFiles) {
+          const lineCount = (content || "").split("\n").length;
+          if (lineCount > 200) {
+            items.push({
+              id: `dc-py-large-${id++}`,
+              name: path.split("/").pop(),
+              type: "Orphan File",
+              file: path,
+              line: null,
+              severity: "low",
+              confidence: 45,
+              reason: `File has ${lineCount} lines — consider refactoring into smaller, focused modules.`,
+              evidence: [`${lineCount} lines in ${path}`],
+            });
+          }
+          if (items.length >= 12) break;
+        }
+
+        return items;
+      }
+
+      // ── Generic non-JS/non-Python fallback ─────────────────────────────────
       for (const [path, content] of Object.entries(sourceFiles)) {
         const lineCount = (content || "").split("\n").length;
-        if (lineCount > 400) {
+        if (lineCount > 300) {
           items.push({
             id: `dc-large-${id++}`,
             name: path.split("/").pop(),
@@ -1755,14 +1895,31 @@ ${licenseSection}
       testRecommendations.push(`${missingTests.length} source file(s) appear untested: ${missingTests.slice(0, 3).join(", ")}${missingTests.length > 3 ? " and more" : ""}.`);
     }
 
-    // Pick the best source file to display (prefer main entry, then largest file)
-    const priority = ["src/index", "src/app", "index", "app", "main", "src/main", "src/lib", "lib/"];
+    // Pick the best source file to display
+    // For Python repos prefer: app.py, main.py, then the largest .py file, then any source file
+    const lang = (language || "").toLowerCase();
     let sampleFile = null;
-    for (const p of priority) {
-      sampleFile = Object.keys(sourceFiles).find((k) => k.includes(p));
-      if (sampleFile) break;
+    if (lang === "python" || Object.keys(sourceFiles).some((k) => k.endsWith(".py"))) {
+      const pyFiles = Object.keys(sourceFiles).filter((k) => k.endsWith(".py") && !k.includes("test") && !k.includes("setup") && !k.includes("config"));
+      const pyPriority = ["app.py", "main.py", "run.py", "server.py", "api.py", "views.py", "models.py", "utils.py"];
+      for (const p of pyPriority) {
+        sampleFile = pyFiles.find((k) => k.endsWith(`/${p}`) || k === p);
+        if (sampleFile) break;
+      }
+      // Fall back to largest Python file with actual function definitions
+      if (!sampleFile) {
+        sampleFile = pyFiles
+          .filter((k) => /def\s+[A-Za-z_]/.test(sourceFiles[k] || ""))
+          .sort((a, b) => (sourceFiles[b] || "").length - (sourceFiles[a] || "").length)[0] || pyFiles[0] || null;
+      }
+    } else {
+      const priority = ["src/index", "src/app", "index", "app", "main", "src/main", "src/lib", "lib/"];
+      for (const p of priority) {
+        sampleFile = Object.keys(sourceFiles).find((k) => k.includes(p));
+        if (sampleFile) break;
+      }
     }
-    // Fall back to the largest file if no priority match
+    // Ultimate fallback: largest file in the set
     if (!sampleFile) {
       sampleFile = Object.entries(sourceFiles).sort((a, b) => b[1].length - a[1].length)[0]?.[0] || null;
     }
@@ -1792,53 +1949,110 @@ ${licenseSection}
 
     // ── Python scaffold ────────────────────────────────────────────────────
     if (lang === "python" || filePath.endsWith(".py")) {
-      const pyFnRe = /^def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/gm;
+      // Extract functions WITH their parameters for richer stubs
+      const pyFnWithParamsRe = /^def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)/gm;
       const pyClassRe = /^class\s+([A-Za-z_][A-Za-z0-9_]*)/gm;
-      const pyFns = [];
+      const pyFns = [];    // [{ name, params: string[] }]
       const pyClasses = [];
       let m;
-      while ((m = pyFnRe.exec(content)) !== null) {
-        if (!m[1].startsWith("_") && !pyFns.includes(m[1])) pyFns.push(m[1]);
+      while ((m = pyFnWithParamsRe.exec(content)) !== null) {
+        if (!m[1].startsWith("_") && !pyFns.find((f) => f.name === m[1])) {
+          const rawParams = m[2].split(",").map((p) => p.trim().split(":")[0].trim().split("=")[0].trim()).filter((p) => p && p !== "self" && p !== "cls" && p !== "*args" && p !== "**kwargs");
+          pyFns.push({ name: m[1], params: rawParams });
+        }
       }
       while ((m = pyClassRe.exec(content)) !== null) pyClasses.push(m[1]);
 
       const moduleName = fileName.replace(/-/g, "_");
+
+      // If the file has no public functions/classes, produce a minimal integration test
+      if (pyFns.length === 0 && pyClasses.length === 0) {
+        return `"""Tests for ${moduleName}."""
+import pytest
+import importlib
+
+
+def test_module_imports():
+    """${moduleName} should be importable without errors."""
+    mod = importlib.import_module("${moduleName}")
+    assert mod is not None
+
+
+def test_module_has_attributes():
+    """${moduleName} should expose at least one public attribute."""
+    import ${moduleName}
+    public_attrs = [a for a in dir(${moduleName}) if not a.startswith("_")]
+    assert len(public_attrs) > 0, "Module exposes no public symbols"
+`;
+      }
+
       const classTests = pyClasses.slice(0, 2).map((cls) => `
 class Test${cls}:
+    """Tests for the ${cls} class."""
+
     def test_instantiation(self):
         """${cls} should instantiate without raising."""
         instance = ${cls}()
         assert instance is not None
 
     def test_repr(self):
-        """${cls} should have a meaningful string representation."""
+        """${cls}.__str__ / __repr__ should return a string."""
         instance = ${cls}()
-        assert str(instance) is not None
+        assert isinstance(str(instance), str)
+
+    def test_type(self):
+        """Instance should be of type ${cls}."""
+        instance = ${cls}()
+        assert isinstance(instance, ${cls})
 `).join("\n");
 
-      const fnTests = pyFns.slice(0, 5).map((fn) => `
-def test_${fn}_returns_value():
-    """${fn} should return a non-None value for valid input."""
-    result = ${fn}()
-    assert result is not None
+      const fnTests = pyFns.slice(0, 5).map(({ name, params }) => {
+        const hasParams = params.length > 0;
+        const paramPlaceholders = params.map((p) => {
+          const pl = p.toLowerCase();
+          if (pl.includes("path") || pl.includes("file")) return `"/tmp/test_file.txt"`;
+          if (pl.includes("url"))    return `"https://example.com"`;
+          if (pl.includes("name"))   return `"test_name"`;
+          if (pl.includes("id"))     return `1`;
+          if (pl.includes("count") || pl.includes("num") || pl.includes("size") || pl.includes("n")) return `5`;
+          if (pl.includes("flag") || pl.includes("enable") || pl.includes("active") || pl.includes("debug")) return `False`;
+          if (pl.includes("list") || pl.includes("items") || pl.includes("arr")) return `[]`;
+          if (pl.includes("dict") || pl.includes("data") || pl.includes("config") || pl.includes("obj")) return `{}`;
+          if (pl.includes("text") || pl.includes("msg") || pl.includes("content") || pl.includes("string") || pl.includes("s")) return `"sample text"`;
+          if (pl.includes("image") || pl.includes("img") || pl.includes("frame")) return `None`;
+          return `None`;
+        });
+        const callArgs = hasParams ? paramPlaceholders.join(", ") : "";
+        const callExpr = `${name}(${callArgs})`;
+        return `
+def test_${name}_basic():
+    """${name} should execute without raising for typical input."""
+    result = ${callExpr}
+    # Assert the expected return type/value
+    assert result is not None or result == [] or result == {} or result == ""
 
 
-def test_${fn}_type():
-    """${fn} should return the expected type."""
-    result = ${fn}()
-    # Replace with the actual expected type
-    assert result is not None
+def test_${name}_returns_expected_type():
+    """${name} should return a predictable type."""
+    result = ${callExpr}
+    # Update the expected type below
+    assert result is not None or isinstance(result, (str, int, float, list, dict, bool))
 
 
-def test_${fn}_edge_case():
-    """${fn} should handle edge cases (empty, None, zero) gracefully."""
-    # Add edge-case assertions specific to ${fn}
-    pass
-`).join("\n");
+def test_${name}_edge_case():
+    """${name} should handle edge-case inputs gracefully."""
+    # Replace with appropriate edge-case values for ${name}
+    try:
+        ${name}(${params.map(() => "None").join(", ")})
+    except (TypeError, ValueError):
+        pass  # A typed exception for None input is acceptable
+`;
+      }).join("\n");
 
+      const importList = [...pyFns.slice(0, 5).map((f) => f.name), ...pyClasses.slice(0, 2)].join(", ");
       return `"""Tests for ${moduleName}."""
 import pytest
-from ${moduleName} import ${[...pyFns.slice(0, 5), ...pyClasses.slice(0, 2)].join(", ") || moduleName}
+from ${moduleName} import ${importList || moduleName}
 
 
 ${classTests}
