@@ -145,24 +145,71 @@ async function fetchGitHubPayload(repoName, input) {
 
   console.log(`[RepoPilot] Files discovered: ${allFiles.length} total`);
 
-  // Categorize files
+  // Categorize files — test files are separated first so they don't consume source file slots
+  const testFilePaths = allFiles
+    .filter((p) => !isExcludedPath(p) && isTestFile(p))
+    .slice(0, MAX_TEST_FILES);
+
   const sourceFilePaths = allFiles
-    .filter((p) => !isExcludedPath(p) && isSourceFile(p))
+    .filter((p) => !isExcludedPath(p) && isSourceFile(p) && !isTestFile(p))
     .slice(0, MAX_SOURCE_FILES);
 
   const configFilePaths = allFiles
     .filter((p) => !isExcludedPath(p) && isConfigFile(p))
     .slice(0, MAX_CONFIG_FILES);
 
-  const testFilePaths = allFiles
-    .filter((p) => !isExcludedPath(p) && isTestFile(p))
-    .slice(0, MAX_TEST_FILES);
-
   console.log(`[RepoPilot] Source files selected: ${sourceFilePaths.length}, config: ${configFilePaths.length}, tests: ${testFilePaths.length}`);
 
-  // Fetch key file contents
+  // ── Detect monorepo structure from the file tree ───────────────────────────
+  // Common patterns: frontend/, backend/, client/, server/, packages/, apps/
+  const MONOREPO_DIRS = ["frontend", "backend", "client", "server", "api", "web", "app", "packages", "apps", "services"];
+  const monorepoServices = MONOREPO_DIRS.filter((dir) =>
+    allFiles.some((f) => f.startsWith(`${dir}/`))
+  );
+  const isMonorepo = monorepoServices.length >= 2;
+  console.log(`[RepoPilot] Monorepo: ${isMonorepo} — services: ${monorepoServices.join(", ") || "none"}`);
+
+  // ── Fetch manifests — root first, then nested for monorepos ───────────────
   const packageManifest = await fetchGitHubFile(slug, "package.json", headers, true);
-  // Also try requirements.txt, pyproject.toml, go.mod, Cargo.toml, pom.xml
+
+  // For monorepos, collect per-service package.json and requirements.txt
+  const monorepoManifests = {};
+  if (isMonorepo) {
+    const manifestFetches = await Promise.all(
+      monorepoServices.flatMap((dir) => [
+        fetchGitHubFile(slug, `${dir}/package.json`, headers, true).then((c) => c ? [`${dir}/package.json`, c] : null),
+        fetchGitHubFile(slug, `${dir}/requirements.txt`, headers).then((c) => c ? [`${dir}/requirements.txt`, c] : null),
+        fetchGitHubFile(slug, `${dir}/pyproject.toml`, headers).then((c) => c ? [`${dir}/pyproject.toml`, c] : null),
+        fetchGitHubFile(slug, `${dir}/go.mod`, headers).then((c) => c ? [`${dir}/go.mod`, c] : null),
+      ])
+    );
+    for (const entry of manifestFetches) {
+      if (entry) monorepoManifests[entry[0]] = entry[1];
+    }
+    console.log(`[RepoPilot] Monorepo manifests found: ${Object.keys(monorepoManifests).join(", ") || "none"}`);
+  }
+
+  // Combine monorepo package.json manifests into a single merged view for the rule engine
+  // Strategy: merge all found package.json dependencies so the full stack is visible
+  let effectivePackageManifest = packageManifest;
+  if (!effectivePackageManifest && isMonorepo) {
+    const pkgManifests = Object.entries(monorepoManifests)
+      .filter(([k]) => k.endsWith("package.json"))
+      .map(([, v]) => v);
+    if (pkgManifests.length > 0) {
+      // Merge all package.json files into one combined manifest
+      effectivePackageManifest = pkgManifests.reduce((acc, pkg) => {
+        acc.dependencies = { ...(acc.dependencies || {}), ...(pkg.dependencies || {}) };
+        acc.devDependencies = { ...(acc.devDependencies || {}), ...(pkg.devDependencies || {}) };
+        acc.scripts = acc.scripts || pkg.scripts || {};
+        acc.name = acc.name || pkg.name;
+        acc.engines = acc.engines || pkg.engines;
+        return acc;
+      }, { name: repoName, dependencies: {}, devDependencies: {}, scripts: {} });
+    }
+  }
+
+  // Alt manifest paths for non-JS roots
   const altManifestPaths = ["requirements.txt", "pyproject.toml", "go.mod", "Cargo.toml", "pom.xml", "build.gradle"];
 
   const readmeContent = await fetchGitHubFile(slug, "README.md", headers) ||
@@ -185,8 +232,15 @@ async function fetchGitHubPayload(repoName, input) {
     if (content) configurationFiles[p] = content;
   }
 
-  // Also try to fetch alternative manifests if package.json not found
-  if (!packageManifest) {
+  // Add monorepo manifests to configurationFiles so the rule engine can read them
+  for (const [path, content] of Object.entries(monorepoManifests)) {
+    if (!configurationFiles[path]) {
+      configurationFiles[path] = typeof content === "string" ? content : JSON.stringify(content, null, 2);
+    }
+  }
+
+  // Also try to fetch alternative manifests if no package.json found at root or in monorepo
+  if (!effectivePackageManifest) {
     for (const altPath of altManifestPaths) {
       const content = await fetchGitHubFile(slug, altPath, headers);
       if (content) {
@@ -209,7 +263,7 @@ async function fetchGitHubPayload(repoName, input) {
   return {
     repositoryName: meta.name || repoName,
     fileTree,
-    packageManifest: packageManifest || null,
+    packageManifest: effectivePackageManifest || null,
     readme: readmeContent || null,
     sourceFiles,
     configurationFiles,
@@ -220,6 +274,8 @@ async function fetchGitHubPayload(repoName, input) {
       description: meta.description,
       stars: meta.stargazers_count,
       defaultBranch: meta.default_branch,
+      isMonorepo,
+      monorepoServices,
     },
   };
 }
@@ -258,9 +314,10 @@ async function extractZipPayload(repoName, file) {
     .map((p) => (prefix ? p.slice(prefix.length) : p))
     .filter((p) => p && !isExcludedPath(p));
 
-  const sourceFilePaths = allPaths.filter(isSourceFile).slice(0, MAX_SOURCE_FILES);
-  const configFilePaths = allPaths.filter(isConfigFile).slice(0, MAX_CONFIG_FILES);
+  // Separate test files first so they don't consume source file slots
   const testFilePaths = allPaths.filter(isTestFile).slice(0, MAX_TEST_FILES);
+  const sourceFilePaths = allPaths.filter((p) => isSourceFile(p) && !isTestFile(p)).slice(0, MAX_SOURCE_FILES);
+  const configFilePaths = allPaths.filter(isConfigFile).slice(0, MAX_CONFIG_FILES);
 
   const getContent = async (path) => {
     const zipPath = prefix ? prefix + path : path;
@@ -380,7 +437,7 @@ async function fetchRawFallbackPayload(repoName, slug) {
 
   const rawFetch = (path) => fetchRaw(slug, branch, path);
 
-  // Fetch all well-known files in parallel
+  // Fetch root-level well-known files in parallel
   const [
     readmeMain, readmeLower, readmeCap,
     pkgRaw,
@@ -403,8 +460,8 @@ async function fetchRawFallbackPayload(repoName, slug) {
 
   const readmeContent = readmeMain || readmeLower || readmeCap;
 
-  let packageManifest = null;
-  try { if (pkgRaw) packageManifest = JSON.parse(pkgRaw); } catch { /* ignore */ }
+  let rootPackageManifest = null;
+  try { if (pkgRaw) rootPackageManifest = JSON.parse(pkgRaw); } catch { /* ignore */ }
 
   const configurationFiles = {};
   if (requirementsTxt) configurationFiles["requirements.txt"] = requirementsTxt;
@@ -413,7 +470,53 @@ async function fetchRawFallbackPayload(repoName, slug) {
   if (cargoToml)      configurationFiles["Cargo.toml"]       = cargoToml;
   if (pomXml)         configurationFiles["pom.xml"]          = pomXml;
 
-  // Fetch a handful of common source entry-points
+  // ── Probe common monorepo service directories ─────────────────────────────
+  const MONOREPO_DIRS = ["frontend", "backend", "client", "server", "api", "web", "app"];
+  const monoFetches = await Promise.all(
+    MONOREPO_DIRS.flatMap((dir) => [
+      rawFetch(`${dir}/package.json`).then((c) => c ? [`${dir}/package.json`, c] : null),
+      rawFetch(`${dir}/requirements.txt`).then((c) => c ? [`${dir}/requirements.txt`, c] : null),
+      rawFetch(`${dir}/pyproject.toml`).then((c) => c ? [`${dir}/pyproject.toml`, c] : null),
+      rawFetch(`${dir}/.env.example`).then((c) => c ? [`${dir}/.env.example`, c] : null),
+    ])
+  );
+  const monorepoManifests = {};
+  for (const entry of monoFetches) {
+    if (entry) monorepoManifests[entry[0]] = entry[1];
+  }
+
+  // Merge found per-service package.json files into one effective manifest
+  const servicePackages = Object.entries(monorepoManifests)
+    .filter(([k]) => k.endsWith("package.json"))
+    .map(([, v]) => { try { return typeof v === "string" ? JSON.parse(v) : v; } catch { return null; } })
+    .filter(Boolean);
+
+  let effectivePackageManifest = rootPackageManifest;
+  if (!effectivePackageManifest && servicePackages.length > 0) {
+    effectivePackageManifest = servicePackages.reduce((acc, pkg) => {
+      acc.dependencies = { ...(acc.dependencies || {}), ...(pkg.dependencies || {}) };
+      acc.devDependencies = { ...(acc.devDependencies || {}), ...(pkg.devDependencies || {}) };
+      acc.scripts = acc.scripts || pkg.scripts || {};
+      acc.name = acc.name || pkg.name;
+      return acc;
+    }, { name: repoName, dependencies: {}, devDependencies: {}, scripts: {} });
+  }
+
+  // Add monorepo manifests to config files so rule engine can see them
+  for (const [path, content] of Object.entries(monorepoManifests)) {
+    if (!configurationFiles[path]) {
+      configurationFiles[path] = typeof content === "string" ? content : JSON.stringify(content, null, 2);
+    }
+  }
+
+  // Detected monorepo services
+  const detectedDirs = new Set(
+    Object.keys(monorepoManifests).map((p) => p.split("/")[0])
+  );
+  const isMonorepo = detectedDirs.size >= 2;
+  const monorepoServices = [...detectedDirs];
+
+  // Fetch a handful of common source entry-points (root + monorepo)
   const commonSources = [
     "src/index.ts", "src/index.tsx", "src/index.js",
     "src/app/page.tsx", "src/app/page.jsx",
@@ -421,6 +524,10 @@ async function fetchRawFallbackPayload(repoName, slug) {
     "main.py", "app.py", "manage.py",
     "main.go", "cmd/main.go",
     "src/main.rs", "main.rs",
+    // Monorepo-aware entry points
+    "frontend/src/main.tsx", "frontend/src/main.ts", "frontend/src/App.tsx",
+    "backend/main.py", "backend/app/main.py", "backend/main.py",
+    "client/src/main.tsx", "server/index.ts", "server/index.js",
   ];
   const sourceFiles = {};
   const sourceFetches = await Promise.all(commonSources.map((p) => rawFetch(p).then((c) => [p, c])));
@@ -428,7 +535,7 @@ async function fetchRawFallbackPayload(repoName, slug) {
     if (content) sourceFiles[path] = content.slice(0, MAX_FILE_CHARS);
   }
 
-  // Try to fetch .env.example
+  // Try to fetch .env.example (root and per-service)
   const envExample = await rawFetch(".env.example") || await rawFetch(".env.sample");
   if (envExample) configurationFiles[".env.example"] = envExample;
 
@@ -439,12 +546,12 @@ async function fetchRawFallbackPayload(repoName, slug) {
     readmeContent ? "README.md" : null,
   ].filter(Boolean);
 
-  console.log(`[repoExtractor] Raw fallback fetched — readme:${!!readmeContent}, pkg:${!!packageManifest}, sources:${Object.keys(sourceFiles).length}, configs:${Object.keys(configurationFiles).length}`);
+  console.log(`[repoExtractor] Raw fallback fetched — readme:${!!readmeContent}, pkg:${!!effectivePackageManifest}, monorepo:${isMonorepo}(${monorepoServices.join(",")}), sources:${Object.keys(sourceFiles).length}, configs:${Object.keys(configurationFiles).length}`);
 
   return {
     repositoryName: repoName,
     fileTree: allFoundPaths,
-    packageManifest,
+    packageManifest: effectivePackageManifest,
     readme: readmeContent,
     sourceFiles,
     configurationFiles,
@@ -455,6 +562,8 @@ async function fetchRawFallbackPayload(repoName, slug) {
       description: null,
       stars: null,
       defaultBranch: branch,
+      isMonorepo,
+      monorepoServices,
     },
   };
 }

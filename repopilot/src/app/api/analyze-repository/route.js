@@ -92,11 +92,13 @@ export async function POST(request) {
   const sanitisedMetadata =
     metadata && typeof metadata === "object"
       ? {
-          githubSlug:    typeof metadata.githubSlug    === "string" ? metadata.githubSlug : undefined,
-          language:      typeof metadata.language      === "string" ? metadata.language : undefined,
-          description:   typeof metadata.description   === "string" ? metadata.description.slice(0, 500) : undefined,
-          stars:         typeof metadata.stars         === "number" ? metadata.stars : undefined,
-          defaultBranch: typeof metadata.defaultBranch === "string" ? metadata.defaultBranch : undefined,
+          githubSlug:        typeof metadata.githubSlug        === "string"  ? metadata.githubSlug : undefined,
+          language:          typeof metadata.language          === "string"  ? metadata.language : undefined,
+          description:       typeof metadata.description       === "string"  ? metadata.description.slice(0, 500) : undefined,
+          stars:             typeof metadata.stars             === "number"  ? metadata.stars : undefined,
+          defaultBranch:     typeof metadata.defaultBranch     === "string"  ? metadata.defaultBranch : undefined,
+          isMonorepo:        typeof metadata.isMonorepo        === "boolean" ? metadata.isMonorepo : undefined,
+          monorepoServices:  Array.isArray(metadata.monorepoServices)        ? metadata.monorepoServices.filter((s) => typeof s === "string").slice(0, 20) : undefined,
         }
       : {};
 

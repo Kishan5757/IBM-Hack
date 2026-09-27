@@ -30,6 +30,8 @@ export const RepositoryContextSchema = z.object({
       description: z.string().optional(),
       stars: z.number().optional(),
       defaultBranch: z.string().optional(),
+      isMonorepo: z.boolean().optional(),
+      monorepoServices: z.array(z.string()).optional(),
     })
     .default({}),
 });

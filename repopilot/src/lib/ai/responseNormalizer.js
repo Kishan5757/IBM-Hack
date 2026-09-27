@@ -128,14 +128,52 @@ export function parseAndNormalize(rawText, repoData, providerLabel = "AI") {
     parsed.setup.requiredSteps = parsed.setup.steps;
   }
 
-  // ── 6. Testing-stats fallback ──────────────────────────────────────────────
+  // ── 6. Testing-stats fallback / enrichment ────────────────────────────────
+  // Compute accurate counts from the file tree whenever available
+  const fileTree = repoData.fileTree || [];
+  const TEST_FILE_RE = /\.(test|spec)\.(js|jsx|ts|tsx)$|__tests__\/|\/tests?\/|\/specs?\//i;
+  const PY_TEST_RE = /(?:^|\/)test_[^/]+\.py$|(?:^|\/)[^/]+_test\.py$/;
+  const GO_TEST_RE = /_test\.go$/;
+  const JAVA_TEST_RE = /Test\.java$|Tests\.java$/;
+  const SOURCE_EXT_RE = /\.(js|jsx|ts|tsx|py|rb|go|rs|java|kt|cs|cpp|c|php|swift|scala)$/i;
+
+  const treeTestCount = fileTree.filter(
+    (f) => TEST_FILE_RE.test(f) || PY_TEST_RE.test(f) || GO_TEST_RE.test(f) || JAVA_TEST_RE.test(f)
+  ).length;
+  const treeSourceCount = fileTree.filter(
+    (f) => SOURCE_EXT_RE.test(f) && !TEST_FILE_RE.test(f) && !PY_TEST_RE.test(f) && !GO_TEST_RE.test(f) && !JAVA_TEST_RE.test(f)
+  ).length;
+
+  // Use tree counts when they are larger than what the AI reported
+  const reportedTestCount = (parsed.testing.testFilesFound || []).length;
+  const trueTestCount = Math.max(reportedTestCount, treeTestCount);
+  const fetchedSourceCount = Object.keys(repoData.sourceFiles || {}).length;
+  const trueSourceCount = Math.max(fetchedSourceCount, treeSourceCount);
+
+  const coverageRatio = trueSourceCount > 0 ? trueTestCount / trueSourceCount : 0;
+
   if (!parsed.testing.stats || parsed.testing.stats.length === 0) {
-    const testCount = (parsed.testing.testFilesFound || []).length;
     parsed.testing.stats = [
-      { label: "Test Files", value: String(testCount), color: testCount > 0 ? "emerald" : "rose" },
-      { label: "Coverage Estimate", value: testCount > 0 ? "~20%" : "0%", color: testCount > 0 ? "amber" : "rose" },
+      { label: "Test Files", value: String(trueTestCount), color: trueTestCount > 0 ? "emerald" : "rose" },
+      { label: "Coverage Estimate", value: trueTestCount === 0 ? "0%" : coverageRatio >= 0.5 ? "~65%" : coverageRatio >= 0.2 ? "~30%" : "~15%", color: trueTestCount === 0 ? "rose" : coverageRatio >= 0.5 ? "emerald" : "amber" },
       { label: "Framework", value: parsed.testing.framework || "None detected", color: "indigo" },
+      { label: "Source Files", value: String(trueSourceCount), color: "indigo" },
     ];
+  } else {
+    // Patch existing stats: if the AI returned test count 0 but the tree has tests, fix it
+    parsed.testing.stats = parsed.testing.stats.map((s) => {
+      if (s.label === "Test Files" && trueTestCount > Number(s.value || 0)) {
+        return { ...s, value: String(trueTestCount), color: "emerald" };
+      }
+      if (s.label === "Source Files" && trueSourceCount > Number(s.value || 0)) {
+        return { ...s, value: String(trueSourceCount) };
+      }
+      return s;
+    });
+    // Ensure "Source Files" stat always exists
+    if (!parsed.testing.stats.find((s) => s.label === "Source Files")) {
+      parsed.testing.stats.push({ label: "Source Files", value: String(trueSourceCount), color: "indigo" });
+    }
   }
 
   // ── 7. Normalise deadCode items ────────────────────────────────────────────

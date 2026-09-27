@@ -137,19 +137,24 @@ export class RuleBasedProvider {
       metadata = {},
     } = ctx;
 
+    // ── 0. Monorepo detection ────────────────────────────────────────────────
+    const isMonorepo = !!metadata?.isMonorepo ||
+      this._detectMonorepo(fileTree, configurationFiles);
+    const monorepoServices = metadata?.monorepoServices || this._inferMonorepoServices(fileTree, configurationFiles);
+
     // ── 1. Language & framework detection ───────────────────────────────────
     const language = this._detectLanguage(pkg, fileTree, metadata);
-    const { framework, stack } = this._detectFramework(pkg, fileTree, configurationFiles, language);
+    const { framework, stack } = this._detectFramework(pkg, fileTree, configurationFiles, language, isMonorepo, monorepoServices);
     const testFramework = this._detectTestFramework(pkg, fileTree);
 
     // ── 2. Dependency analysis ───────────────────────────────────────────────
-    const { depNodes, depAlerts, depOutdated } = this._analyzeDependencies(pkg, repositoryName, configurationFiles);
+    const { depNodes, depAlerts, depOutdated } = this._analyzeDependencies(pkg, repositoryName, configurationFiles, isMonorepo);
 
     // ── 3. Environment variables ─────────────────────────────────────────────
     const envVars = this._extractEnvVars(sourceFiles, configurationFiles);
 
     // ── 4. Setup steps ───────────────────────────────────────────────────────
-    const setupSteps = this._buildSetupSteps(pkg, repositoryName, configurationFiles, language, framework, metadata);
+    const setupSteps = this._buildSetupSteps(pkg, repositoryName, configurationFiles, language, framework, metadata, isMonorepo, monorepoServices);
 
     // ── 5. README quality ────────────────────────────────────────────────────
     const { qualityScore, missingSections, readmeIssues } = this._scoreReadme(readme);
@@ -222,6 +227,25 @@ export class RuleBasedProvider {
     };
   }
 
+  // ─── Monorepo helpers ─────────────────────────────────────────────────────
+
+  _detectMonorepo(fileTree, configFiles) {
+    const MONO_DIRS = ["frontend", "backend", "client", "server", "api", "web"];
+    const found = MONO_DIRS.filter((dir) =>
+      fileTree.some((f) => f.startsWith(`${dir}/`)) ||
+      Object.keys(configFiles).some((k) => k.startsWith(`${dir}/`))
+    );
+    return found.length >= 2;
+  }
+
+  _inferMonorepoServices(fileTree, configFiles) {
+    const MONO_DIRS = ["frontend", "backend", "client", "server", "api", "web", "app", "packages", "apps", "services"];
+    return MONO_DIRS.filter((dir) =>
+      fileTree.some((f) => f.startsWith(`${dir}/`)) ||
+      Object.keys(configFiles).some((k) => k.startsWith(`${dir}/`))
+    );
+  }
+
   // ─── Language detection ────────────────────────────────────────────────────
 
   _detectLanguage(pkg, fileTree, metadata) {
@@ -247,21 +271,66 @@ export class RuleBasedProvider {
 
   // ─── Framework detection ───────────────────────────────────────────────────
 
-  _detectFramework(pkg, fileTree, configFiles, language) {
+  _detectFramework(pkg, fileTree, configFiles, language, isMonorepo = false, monorepoServices = []) {
+    const configKeys = Object.keys(configFiles).join(" ").toLowerCase();
+    const treeStr = fileTree.join(" ").toLowerCase();
+
+    // ── Monorepo: detect all services and combine their frameworks into one description ──
+    if (isMonorepo && monorepoServices.length > 0) {
+      const serviceFrameworks = [];
+      const combinedStack = new Set();
+
+      // Detect Python backends
+      const allReqContent = Object.entries(configFiles)
+        .filter(([k]) => k.includes("requirements.txt") || k.includes("pyproject.toml"))
+        .map(([, v]) => v).join(" ");
+      if (allReqContent) {
+        combinedStack.add("Python");
+        if (allReqContent.match(/fastapi/i)) { serviceFrameworks.push("FastAPI"); combinedStack.add("FastAPI"); combinedStack.add("Uvicorn"); }
+        else if (allReqContent.match(/django/i)) { serviceFrameworks.push("Django"); combinedStack.add("Django"); }
+        else if (allReqContent.match(/flask/i)) { serviceFrameworks.push("Flask"); combinedStack.add("Flask"); }
+        else serviceFrameworks.push("Python");
+      }
+
+      // Detect JS frontend
+      if (pkg) {
+        for (const rule of FRAMEWORK_RULES) {
+          if (rule.test(pkg)) {
+            serviceFrameworks.push(rule.name);
+            for (const s of this._buildStack(pkg, rule.name, language)) combinedStack.add(s);
+            break;
+          }
+        }
+        if (serviceFrameworks.length === (allReqContent ? 1 : 0)) {
+          // No JS framework matched — add generic JS label
+          serviceFrameworks.push(language === "TypeScript" ? "TypeScript (Vite)" : "JavaScript (Vite)");
+          for (const s of this._buildStack(pkg, "Vite", language)) combinedStack.add(s);
+        }
+      } else if (treeStr.includes("vite.config") || treeStr.includes("frontend/src")) {
+        serviceFrameworks.push("Vite (Frontend)");
+        combinedStack.add("JavaScript");
+        combinedStack.add("Vite");
+      }
+
+      if (serviceFrameworks.length > 0) {
+        return {
+          framework: serviceFrameworks.join(" + "),
+          stack: [...combinedStack].filter(Boolean).slice(0, 12),
+        };
+      }
+    }
+
     if (!pkg) {
       // Non-JS: detect from config files and file tree
-      const configKeys = Object.keys(configFiles).join(" ").toLowerCase();
-      const treeStr = fileTree.join(" ").toLowerCase();
-
       if (configKeys.includes("requirements.txt") || configKeys.includes("pyproject.toml")) {
-        const reqContent = configFiles["requirements.txt"] || "";
-        const pyprojectContent = configFiles["pyproject.toml"] || "";
-        const combined = reqContent + pyprojectContent;
-        if (combined.match(/django/i)) return { framework: "Django", stack: ["Python", "Django"] };
-        if (combined.match(/flask/i)) return { framework: "Flask", stack: ["Python", "Flask"] };
-        if (combined.match(/fastapi/i)) return { framework: "FastAPI", stack: ["Python", "FastAPI", "Uvicorn"] };
-        if (combined.match(/tornado/i)) return { framework: "Tornado", stack: ["Python", "Tornado"] };
-        if (combined.match(/starlette/i)) return { framework: "Starlette", stack: ["Python", "Starlette"] };
+        const allReqContent = Object.entries(configFiles)
+          .filter(([k]) => k.includes("requirements.txt") || k.includes("pyproject.toml"))
+          .map(([, v]) => v).join(" ");
+        if (allReqContent.match(/django/i)) return { framework: "Django", stack: ["Python", "Django"] };
+        if (allReqContent.match(/flask/i)) return { framework: "Flask", stack: ["Python", "Flask"] };
+        if (allReqContent.match(/fastapi/i)) return { framework: "FastAPI", stack: ["Python", "FastAPI", "Uvicorn"] };
+        if (allReqContent.match(/tornado/i)) return { framework: "Tornado", stack: ["Python", "Tornado"] };
+        if (allReqContent.match(/starlette/i)) return { framework: "Starlette", stack: ["Python", "Starlette"] };
         return { framework: "Python", stack: ["Python"] };
       }
       if (configKeys.includes("go.mod") || treeStr.includes("go.mod")) return { framework: "Go", stack: ["Go"] };
@@ -415,25 +484,30 @@ export class RuleBasedProvider {
 
   // ─── Dependency analysis ───────────────────────────────────────────────────
 
-  _analyzeDependencies(pkg, repoName, configFiles = {}) {
+  _analyzeDependencies(pkg, repoName, configFiles = {}, isMonorepo = false) {
     const depNodes = [{ id: "root", label: repoName, type: "root", health: "ok" }];
     const depAlerts = [];
     const depOutdated = [];
 
-    // ── Non-JS: parse requirements.txt / go.mod / Cargo.toml / pom.xml ───────
+    // ── Always parse non-JS manifests from config files (handles monorepos) ──
+    // This covers: root requirements.txt, backend/requirements.txt, go.mod, Cargo.toml etc.
+    this._parseNonJsDeps(configFiles, depNodes);
+
     if (!pkg) {
-      this._parseNonJsDeps(configFiles, depNodes);
+      // Pure non-JS project — non-JS deps already added above
       return { depNodes, depAlerts, depOutdated };
     }
 
     const prod = pkg.dependencies || {};
     const dev = pkg.devDependencies || {};
 
-    // Build nodes for all dependencies
+    // Build nodes for all JS/TS dependencies
     for (const [name, version] of Object.entries(prod)) {
       const isVuln = VULNERABILITY_ADVISORIES.some((a) => a.pkg === name && a.versionRe.test(version));
       const health = isVuln ? "warning" : "ok";
-      depNodes.push({ id: name, label: `${name}@${version}`, type: "dep", health });
+      // Avoid duplicate IDs with Python deps
+      const id = depNodes.find((n) => n.id === name) ? `js-${name}` : name;
+      depNodes.push({ id, label: `${name}@${version}`, type: "dep", health });
     }
     for (const [name, version] of Object.entries(dev)) {
       const isVuln = VULNERABILITY_ADVISORIES.some((a) => a.pkg === name && a.versionRe.test(version));
@@ -471,17 +545,26 @@ export class RuleBasedProvider {
    * Handles: requirements.txt, go.mod, Cargo.toml, pom.xml / build.gradle.
    */
   _parseNonJsDeps(configFiles, depNodes) {
+    const existingIds = new Set(depNodes.map((n) => n.id));
+
     // requirements.txt — "package==1.2.3" or "package>=1.0"
-    const reqTxt = configFiles["requirements.txt"] || configFiles["requirements/base.txt"] || "";
-    if (reqTxt) {
+    // Scan ALL requirements files found, including nested ones like backend/requirements.txt
+    const reqPaths = Object.keys(configFiles).filter(
+      (k) => k === "requirements.txt" || k.endsWith("/requirements.txt") ||
+             k === "requirements/base.txt" || k.endsWith("/requirements/base.txt")
+    );
+    for (const reqPath of reqPaths) {
+      const reqTxt = configFiles[reqPath] || "";
       for (const line of reqTxt.split("\n")) {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("-")) continue;
         const m = trimmed.match(/^([A-Za-z0-9_.-]+)\s*([>=<!~^].+)?$/);
         if (m) {
           const name = m[1];
+          if (existingIds.has(name)) continue; // skip if already added
           const version = (m[2] || "").trim() || "*";
           depNodes.push({ id: name, label: `${name}@${version}`, type: "dep", health: "ok" });
+          existingIds.add(name);
         }
       }
     }
@@ -580,7 +663,7 @@ export class RuleBasedProvider {
 
   // ─── Setup steps ──────────────────────────────────────────────────────────
 
-  _buildSetupSteps(pkg, repoName, configFiles, language, framework, metadata) {
+  _buildSetupSteps(pkg, repoName, configFiles, language, framework, metadata, isMonorepo = false, monorepoServices = []) {
     const steps = [];
     let id = 1;
 
@@ -598,6 +681,133 @@ export class RuleBasedProvider {
       description: "Clone the project to your local machine.",
     });
 
+    // ── Monorepo: generate per-service setup steps ─────────────────────────
+    if (isMonorepo && monorepoServices.length >= 2) {
+      // Detect which services exist and what type they are
+      const hasPythonBackend = monorepoServices.some((dir) =>
+        Object.keys(configFiles).some((k) => k.startsWith(`${dir}/requirements`) || k.startsWith(`${dir}/pyproject`)) ||
+        (configFiles["backend/requirements.txt"] || configFiles["requirements.txt"])
+      );
+      const hasJsFrontend = pkg || monorepoServices.some((dir) =>
+        Object.keys(configFiles).some((k) => k.startsWith(`${dir}/package.json`))
+      );
+
+      // Detect backend directory name
+      const backendDir = ["backend", "server", "api"].find((d) => monorepoServices.includes(d)) || "backend";
+      // Detect frontend directory name
+      const frontendDir = ["frontend", "client", "web"].find((d) => monorepoServices.includes(d)) || "frontend";
+
+      // Detect env example paths
+      const hasBackendEnv = Object.keys(configFiles).some((f) =>
+        f.startsWith(`${backendDir}/`) && /\.env\.(example|sample)/i.test(f)
+      );
+      const hasFrontendEnv = Object.keys(configFiles).some((f) =>
+        f.startsWith(`${frontendDir}/`) && /\.env\.(example|sample)/i.test(f)
+      );
+      const hasRootEnv = Object.keys(configFiles).some((f) =>
+        (f === ".env.example" || f === ".env.sample") && !f.includes("/")
+      );
+
+      // Detect frontend package manager
+      const hasPnpm = Object.keys(configFiles).some((f) => f.includes("pnpm-lock"));
+      const hasYarn = Object.keys(configFiles).some((f) => f.includes("yarn.lock"));
+      const hasBun = Object.keys(configFiles).some((f) => f.includes("bun.lockb") || f.includes("bun.lock"));
+      const pm = hasBun ? "bun" : hasPnpm ? "pnpm" : hasYarn ? "yarn" : "npm";
+
+      // Check for docker-compose
+      const hasCompose = Object.keys(configFiles).some((f) => f.includes("docker-compose")) ||
+        (metadata?.fileTree || []).some?.((f) => f.includes("docker-compose"));
+
+      if (hasCompose) {
+        steps.push({
+          id: id++,
+          title: "Quick start with Docker Compose (recommended)",
+          command: `cp ${backendDir}/.env.example ${backendDir}/.env\ndocker compose up --build`,
+          description: `Starts all services (backend + frontend) in one command. Visit http://localhost:5173 for the frontend and http://localhost:8000 for the API.`,
+        });
+        steps.push({
+          id: id++,
+          title: "Seed the database (first run only)",
+          command: `docker compose exec ${backendDir} python -m app.seed.seed_data`,
+          description: "Populate the database with demo data for initial exploration.",
+        });
+        steps.push({
+          id: id++,
+          title: "[OR] Manual backend setup",
+          command: `cd ${backendDir}\npython -m venv venv && source venv/bin/activate\npip install -r requirements.txt${hasBackendEnv ? `\ncp .env.example .env` : ""}`,
+          description: `Set up the ${backendDir} Python environment manually.`,
+        });
+        steps.push({
+          id: id++,
+          title: "Start backend server (manual)",
+          command: `cd ${backendDir} && uvicorn main:app --reload --port 8000`,
+          description: "Start the backend API server with hot-reload on port 8000.",
+        });
+        steps.push({
+          id: id++,
+          title: "Start frontend (new terminal)",
+          command: `cd ${frontendDir}\n${pm} install${hasFrontendEnv ? `\necho "VITE_API_BASE_URL=http://localhost:8000" > .env` : ""}\n${pm} run dev`,
+          description: `Install frontend dependencies and start the Vite dev server. Visit http://localhost:5173.`,
+        });
+      } else if (hasPythonBackend && hasJsFrontend) {
+        // Python backend + JS frontend (no Docker)
+        steps.push({
+          id: id++,
+          title: `Set up ${backendDir} (Python)`,
+          command: `cd ${backendDir}\npython -m venv venv && source venv/bin/activate\npip install -r requirements.txt`,
+          description: `Create a virtual environment and install ${backendDir} Python dependencies.`,
+        });
+        if (hasBackendEnv || hasRootEnv) {
+          const envSrc = hasBackendEnv ? `${backendDir}/.env.example` : ".env.example";
+          const envDst = hasBackendEnv ? `${backendDir}/.env` : ".env";
+          steps.push({
+            id: id++,
+            title: "Configure environment variables",
+            command: `cp ${envSrc} ${envDst}`,
+            description: "Copy the example env file and fill in required API keys and settings.",
+          });
+        }
+        steps.push({
+          id: id++,
+          title: `Start ${backendDir} server`,
+          command: `cd ${backendDir} && uvicorn main:app --reload --port 8000`,
+          description: "Start the backend API on http://localhost:8000. Keep this terminal running.",
+        });
+        steps.push({
+          id: id++,
+          title: `Set up ${frontendDir} (new terminal)`,
+          command: `cd ${frontendDir} && ${pm} install`,
+          description: `Install ${frontendDir} JavaScript dependencies.`,
+        });
+        if (hasFrontendEnv) {
+          steps.push({
+            id: id++,
+            title: `Configure ${frontendDir} environment`,
+            command: `echo "VITE_API_BASE_URL=http://localhost:8000" > ${frontendDir}/.env`,
+            description: "Point the frontend at the local backend API.",
+          });
+        }
+        steps.push({
+          id: id++,
+          title: `Start ${frontendDir} dev server`,
+          command: `cd ${frontendDir} && ${pm} run dev`,
+          description: `Launch the frontend dev server at http://localhost:5173.`,
+        });
+      } else {
+        // Generic monorepo (unknown service types)
+        for (const dir of monorepoServices.slice(0, 3)) {
+          steps.push({
+            id: id++,
+            title: `Set up ${dir} service`,
+            command: `cd ${dir} && npm install`,
+            description: `Install dependencies for the ${dir} service.`,
+          });
+        }
+      }
+      return steps;
+    }
+
+    // ── Single service: original logic ─────────────────────────────────────
     if (!pkg) {
       // Non-JS languages
       const lang = (language || "").toLowerCase();
@@ -1107,29 +1317,65 @@ ${license ? `## License\n\nThis project is licensed under the ${license} License
   // ─── Test analysis ────────────────────────────────────────────────────────
 
   _analyzeTests(testFramework, testFiles, sourceFiles, fileTree, language) {
-    const testCount = Object.keys(testFiles).length;
-    const sourceCount = Object.keys(sourceFiles).length;
-    const coverageEst = testCount === 0 ? "0%" : testCount >= sourceCount * 0.5 ? "~65%" : testCount >= sourceCount * 0.2 ? "~30%" : "~15%";
-    const coverageColor = testCount === 0 ? "rose" : testCount >= sourceCount * 0.5 ? "emerald" : "amber";
+    // Use fetched testFiles count as floor, but also scan the full fileTree for
+    // a more accurate total — testFiles is capped at MAX_TEST_FILES (10).
+    const fetchedTestCount = Object.keys(testFiles).length;
+    const TEST_FILE_RE = /\.(test|spec)\.(js|jsx|ts|tsx)$|__tests__\/|\/tests?\/|\/specs?\//i;
+    const PY_TEST_RE = /(?:^|\/)test_[^/]+\.py$|(?:^|\/)[^/]+_test\.py$/;
+    const GO_TEST_RE = /_test\.go$/;
+    const JAVA_TEST_RE = /Test\.java$|Tests\.java$/;
+    const treeTestCount = fileTree.filter(
+      (f) => TEST_FILE_RE.test(f) || PY_TEST_RE.test(f) || GO_TEST_RE.test(f) || JAVA_TEST_RE.test(f)
+    ).length;
+    // True test count is the larger of: what we fetched vs what we saw in the tree
+    const testCount = Math.max(fetchedTestCount, treeTestCount);
+
+    // Source file count: also include tree-based estimate when fetched files are few
+    const fetchedSourceCount = Object.keys(sourceFiles).length;
+    const SOURCE_EXT_RE = /\.(js|jsx|ts|tsx|py|rb|go|rs|java|kt|cs|cpp|c|php|swift|scala)$/i;
+    const treeSourceCount = fileTree.filter(
+      (f) => SOURCE_EXT_RE.test(f) && !TEST_FILE_RE.test(f) && !PY_TEST_RE.test(f) && !GO_TEST_RE.test(f) && !JAVA_TEST_RE.test(f)
+    ).length;
+    const sourceCount = Math.max(fetchedSourceCount, treeSourceCount);
+
+    // Coverage estimation using true counts
+    const coverageRatio = sourceCount > 0 ? testCount / sourceCount : 0;
+    const coverageEst = testCount === 0
+      ? "0%"
+      : coverageRatio >= 0.8
+      ? "~80%+"
+      : coverageRatio >= 0.5
+      ? "~65%"
+      : coverageRatio >= 0.2
+      ? "~30%"
+      : "~15%";
+    const coverageColor = testCount === 0 ? "rose" : coverageRatio >= 0.5 ? "emerald" : "amber";
 
     const testStats = [
       { label: "Test Files", value: String(testCount), color: testCount > 0 ? "emerald" : "rose" },
       { label: "Coverage Estimate", value: coverageEst, color: coverageColor },
       { label: "Framework", value: testFramework, color: "indigo" },
-      { label: "Source Files", value: String(sourceCount), color: "indigo" },
+      { label: "Source Files", value: String(sourceCount > 0 ? sourceCount : fetchedSourceCount), color: "indigo" },
     ];
 
     // Which source files lack a corresponding test file?
+    // Build a set of base names from ALL test paths in fileTree (not just fetched ones)
+    const allTestPaths = [
+      ...Object.keys(testFiles),
+      ...fileTree.filter((f) => TEST_FILE_RE.test(f) || PY_TEST_RE.test(f) || GO_TEST_RE.test(f)),
+    ];
     const testedBases = new Set(
-      Object.keys(testFiles).map((p) =>
+      allTestPaths.map((p) =>
         p.replace(/\.(test|spec)\.(js|ts|jsx|tsx)$/, "")
           .replace(/__tests__\//, "")
+          .replace(/test_/, "")
+          .replace(/_test$/, "")
           .split("/").pop()
       )
     );
     const missingTests = Object.keys(sourceFiles)
       .filter((p) => {
-        const base = p.split("/").pop().replace(/\.(ts|tsx|js|jsx)$/, "");
+        const base = p.split("/").pop().replace(/\.(ts|tsx|js|jsx|py|go|rs|java)$/, "");
         return !testedBases.has(base) && !p.includes("config") && !p.includes(".d.ts") && !p.match(/index\.(ts|js|tsx|jsx)$/);
       })
       .slice(0, 6)
@@ -1141,7 +1387,7 @@ ${license ? `## License\n\nThis project is licensed under the ${license} License
         `No tests found. Set up ${testFramework === "None detected" ? "Jest or Vitest" : testFramework} and add unit tests for core logic.`
       );
     }
-    if (testCount > 0 && testCount < sourceCount * 0.3) {
+    if (testCount > 0 && coverageRatio < 0.3) {
       testRecommendations.push("Test coverage appears low. Aim for at least 60% coverage of business-critical code.");
     }
     if (!fileTree.some((f) => f.includes(".github/workflows") || f.includes("ci.yml") || f.includes("ci.yaml"))) {
@@ -1149,6 +1395,9 @@ ${license ? `## License\n\nThis project is licensed under the ${license} License
     }
     if (testCount > 0 && !fileTree.some((f) => f.includes("coverage") || f.includes("lcov"))) {
       testRecommendations.push("Consider adding code coverage reporting (e.g., `--coverage` flag with Jest/Vitest) to track coverage over time.");
+    }
+    if (missingTests.length > 0) {
+      testRecommendations.push(`${missingTests.length} source file(s) appear untested: ${missingTests.slice(0, 3).join(", ")}${missingTests.length > 3 ? " and more" : ""}.`);
     }
 
     // Pick the best source file to display (prefer main entry, then largest file)
@@ -1177,17 +1426,122 @@ ${license ? `## License\n\nThis project is licensed under the ${license} License
   _generateTestScaffold(filePath, content, testFramework, language) {
     const fileName = filePath.split("/").pop().replace(/\.(ts|tsx|js|jsx)$/, "");
     const isTs = filePath.endsWith(".ts") || filePath.endsWith(".tsx");
+    const lang = (language || "").toLowerCase();
+
+    // ── Python scaffold ────────────────────────────────────────────────────
+    if (lang === "python" || filePath.endsWith(".py")) {
+      const pyFnRe = /^def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/gm;
+      const pyClassRe = /^class\s+([A-Za-z_][A-Za-z0-9_]*)/gm;
+      const pyFns = [];
+      const pyClasses = [];
+      let m;
+      while ((m = pyFnRe.exec(content)) !== null) {
+        if (!m[1].startsWith("_") && !pyFns.includes(m[1])) pyFns.push(m[1]);
+      }
+      while ((m = pyClassRe.exec(content)) !== null) pyClasses.push(m[1]);
+
+      const moduleName = fileName.replace(/-/g, "_");
+      const classTests = pyClasses.slice(0, 2).map((cls) => `
+class Test${cls}:
+    def test_instantiation(self):
+        """${cls} should instantiate without raising."""
+        instance = ${cls}()
+        assert instance is not None
+
+    def test_repr(self):
+        """${cls} should have a meaningful string representation."""
+        instance = ${cls}()
+        assert str(instance) is not None
+`).join("\n");
+
+      const fnTests = pyFns.slice(0, 5).map((fn) => `
+def test_${fn}_returns_value():
+    """${fn} should return a non-None value for valid input."""
+    result = ${fn}()
+    assert result is not None
+
+
+def test_${fn}_type():
+    """${fn} should return the expected type."""
+    result = ${fn}()
+    # Replace with the actual expected type
+    assert result is not None
+
+
+def test_${fn}_edge_case():
+    """${fn} should handle edge cases (empty, None, zero) gracefully."""
+    # Add edge-case assertions specific to ${fn}
+    pass
+`).join("\n");
+
+      return `"""Tests for ${moduleName}."""
+import pytest
+from ${moduleName} import ${[...pyFns.slice(0, 5), ...pyClasses.slice(0, 2)].join(", ") || moduleName}
+
+
+${classTests}
+${fnTests}
+`;
+    }
+
+    // ── Go scaffold ────────────────────────────────────────────────────────
+    if (lang === "go" || filePath.endsWith(".go")) {
+      const goFnRe = /^func\s+([A-Z][A-Za-z0-9_]*)\s*\(/gm;
+      const goFns = [];
+      let m;
+      while ((m = goFnRe.exec(content)) !== null) goFns.push(m[1]);
+      const pkgMatch = content.match(/^package\s+(\w+)/m);
+      const pkg = pkgMatch ? pkgMatch[1] : "main";
+
+      const fnTests = goFns.slice(0, 5).map((fn) => `
+func Test${fn}(t *testing.T) {
+\tt.Run("valid input", func(t *testing.T) {
+\t\t// result := ${fn}(/* args */)
+\t\t// if result == nil {
+\t\t// \tt.Errorf("expected non-nil result from ${fn}")
+\t\t// }
+\t})
+
+\tt.Run("edge case", func(t *testing.T) {
+\t\t// Test zero values, empty strings, boundary conditions
+\t})
+}`).join("\n");
+
+      return `package ${pkg}_test
+
+import (
+\t"testing"
+)
+${fnTests || `
+func TestExample(t *testing.T) {
+\tt.Log("Add tests for ${fileName}")
+}`}
+`;
+    }
+
+    // ── JS/TS scaffold ─────────────────────────────────────────────────────
 
     // Extract exported function and class names
     const fnRe = /export\s+(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
     const constRe = /export\s+const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?\(/g;
     const classRe = /export\s+(?:default\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
+
+    // Extract parameter names for richer test stubs
+    const fnWithParamsRe = /export\s+(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(([^)]*)\)/g;
+    const constWithParamsRe = /export\s+const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?\(([^)]*)\)/g;
+
     const fns = [];
     let m;
 
-    while ((m = fnRe.exec(content)) !== null) fns.push({ name: m[1], kind: "function" });
-    while ((m = constRe.exec(content)) !== null) {
-      if (!fns.find((f) => f.name === m[1])) fns.push({ name: m[1], kind: "function" });
+    while ((m = fnWithParamsRe.exec(content)) !== null) {
+      const params = m[2].split(",").map((p) => p.trim().split(":")[0].trim().split("=")[0].trim()).filter(Boolean);
+      fns.push({ name: m[1], params, kind: "function" });
+    }
+    while ((m = constWithParamsRe.exec(content)) !== null) {
+      if (!fns.find((f) => f.name === m[1])) {
+        const params = m[2].split(",").map((p) => p.trim().split(":")[0].trim().split("=")[0].trim()).filter(Boolean);
+        fns.push({ name: m[1], params, kind: "function" });
+      }
     }
     const classes = [];
     while ((m = classRe.exec(content)) !== null) classes.push(m[1]);
@@ -1195,46 +1549,87 @@ ${license ? `## License\n\nThis project is licensed under the ${license} License
     const importPath = `./${fileName}`;
     const isVitest = testFramework.toLowerCase().includes("vitest");
     const testImport = isVitest
-      ? `import { describe, it, expect, vi } from 'vitest';`
-      : `// Using ${testFramework || "Jest"} (globals enabled via config)`;
+      ? `import { describe, it, expect, vi, beforeEach } from 'vitest';`
+      : `import { describe, it, expect, jest, beforeEach } from '@jest/globals';`;
 
     if (fns.length === 0 && classes.length === 0) {
       return `${testImport}
 import * as ${fileName}Module from '${importPath}';
 
 describe('${fileName}', () => {
-  it('module should be importable and defined', () => {
+  it('module exports should be defined', () => {
     expect(${fileName}Module).toBeDefined();
+    expect(typeof ${fileName}Module).toBe('object');
   });
 
-  // TODO: Add specific tests for exported functions/classes
+  it('should load without throwing', () => {
+    expect(() => require('${importPath}')).not.toThrow();
+  });
 });`;
     }
 
+    // Build mock setup for classes that need construction
+    const mockSetup = classes.length > 0
+      ? `\n  // Mocks — replace with real test doubles as needed\n  ${isVitest ? "vi" : "jest"}.clearAllMocks();\n`
+      : "";
+
     const classTests = classes.slice(0, 2).map((cls) => `
   describe('${cls}', () => {
+    let instance${isTs ? `: ${cls}` : ""};
+
+    beforeEach(() => {
+      instance = new ${cls}();
+    });
+
     it('should instantiate without errors', () => {
-      // const instance = new ${cls}(/* args */);
-      // expect(instance).toBeInstanceOf(${cls});
+      expect(instance).toBeInstanceOf(${cls});
+    });
+
+    it('should have expected public interface', () => {
+      // Verify key methods exist before calling them
+      expect(typeof instance).toBe('object');
     });
   });`).join("\n");
 
-    const fnTests = fns.slice(0, 5).map(({ name }) => `
+    const fnTests = fns.slice(0, 5).map(({ name, params }) => {
+      const hasParams = params.length > 0;
+      const paramPlaceholders = params.map((p) => {
+        if (p.toLowerCase().includes("id")) return `'test-id'`;
+        if (p.toLowerCase().includes("name")) return `'test-name'`;
+        if (p.toLowerCase().includes("url")) return `'https://example.com'`;
+        if (p.toLowerCase().includes("count") || p.toLowerCase().includes("num") || p.toLowerCase().includes("size")) return `5`;
+        if (p.toLowerCase().includes("flag") || p.toLowerCase().includes("enable") || p.toLowerCase().includes("active")) return `true`;
+        if (p.toLowerCase().includes("list") || p.toLowerCase().includes("items") || p.toLowerCase().includes("arr")) return `[]`;
+        if (p.toLowerCase().includes("obj") || p.toLowerCase().includes("data") || p.toLowerCase().includes("config")) return `{}`;
+        return `undefined`;
+      });
+      const callExpr = hasParams ? `${name}(${paramPlaceholders.join(", ")})` : `${name}()`;
+
+      return `
   describe('${name}', () => {
-    it('should be defined', () => {
-      expect(${name}).toBeDefined();
+    it('should be exported and callable', () => {
+      expect(typeof ${name}).toBe('function');
     });
 
-    it('should return a defined value for valid input', async () => {
-      // TODO: Replace with real arguments for ${name}
-      // const result = await ${name}(/* args */);
-      // expect(result).toBeDefined();
+    it('should return a defined result for typical input', async () => {
+      const result = await Promise.resolve(${callExpr});
+      // Assert the actual return type / shape here
+      expect(result).toBeDefined();
     });
 
-    it('should handle edge cases gracefully', () => {
-      // TODO: Test null, undefined, empty, and boundary inputs
-    });
-  });`).join("\n");
+    it('should not throw for valid arguments', () => {
+      expect(() => ${callExpr}).not.toThrow();
+    });${
+  hasParams
+    ? `\n\n    it('should handle missing/null arguments gracefully', async () => {
+      // Passing null/undefined should either throw a typed error or return a safe default
+      const nullArgs = [${params.map(() => "null").join(", ")}];
+      await expect(${name}(...nullArgs)).resolves.toBeDefined().catch(() => {/* typed throw is acceptable */});
+    });`
+    : ""
+}
+  });`;
+    }).join("\n");
 
     const importNames = [
       ...fns.slice(0, 5).map((f) => f.name),
@@ -1245,6 +1640,8 @@ describe('${fileName}', () => {
 import { ${importNames} } from '${importPath}';
 
 describe('${fileName}', () => {
+  beforeEach(() => {${mockSetup}
+  });
 ${classTests}
 ${fnTests}
 });`;
@@ -1388,12 +1785,15 @@ ${fnTests}
     // Secondary: extract first meaningful paragraph from readme
     const readmeDesc = readme ? this._extractDescription(readme) : null;
 
-    // Count meaningful signals
+    // Count meaningful signals from the file tree
     const depsCount = Object.keys(pkg?.dependencies || {}).length;
+    const devDepsCount = Object.keys(pkg?.devDependencies || {}).length;
     const testCount = fileTree.filter(
-      (f) => f.includes(".test.") || f.includes(".spec.") || /_test\.(py|go|rs|java)$/.test(f)
+      (f) => /\.(test|spec)\.(js|jsx|ts|tsx)$/.test(f) || /__tests__\//.test(f) ||
+              /\/tests?\//.test(f) || /_test\.(py|go|rs|java)$/.test(f)
     ).length;
-    const hasCI = fileTree.some((f) => f.includes(".github/workflows"));
+    const hasCI = fileTree.some((f) => f.includes(".github/workflows") || f.includes("ci.yml") || f.includes("ci.yaml"));
+    const hasDocker = fileTree.some((f) => f === "Dockerfile" || f.endsWith("/Dockerfile") || f.includes("docker-compose"));
     const stars = metadata?.stars;
 
     // Build language/framework phrase — avoid "Unknown" leaking into user-visible text
@@ -1407,37 +1807,69 @@ ${fnTests}
       ? `project built with ${knownFw}`
       : "software project";
 
-    let summary = "";
-
+    // ── Sentence 1: identity ────────────────────────────────────────────────
+    let identity = "";
     if (ghDesc && ghDesc.length > 20) {
-      summary = `${name} is a ${techPhrase}. ${ghDesc}`;
+      identity = `${name} is a ${techPhrase}. ${ghDesc}`;
     } else if (readmeDesc && readmeDesc.length > 30) {
-      summary = `${name} is a ${techPhrase}. ${readmeDesc}`;
+      identity = `${name} is a ${techPhrase}. ${readmeDesc}`;
     } else {
-      summary = `${name} is a ${techPhrase}.`;
+      identity = `${name} is a ${techPhrase}.`;
     }
 
-    // Add notable stack highlights (skip language, framework, and generic TypeScript/JavaScript)
+    // ── Sentence 2: tech stack highlights ──────────────────────────────────
     const notableStack = stack.filter(
       (s) => s && s !== "Unknown" && s !== language && s !== framework &&
              s !== "TypeScript" && s !== "JavaScript"
-    ).slice(0, 3);
-    if (notableStack.length > 0) {
-      summary += ` It uses ${notableStack.join(", ")}.`;
-    }
+    ).slice(0, 4);
 
-    // Add health signals
-    const signals = [];
-    if (depsCount > 0) signals.push(`${depsCount} production dependencies`);
-    if (testCount > 0) signals.push(`${testCount} test file(s)`);
-    else signals.push("no automated tests");
-    if (hasCI) signals.push("CI/CD configured");
-    if (stars != null && stars > 0) signals.push(`${stars} GitHub stars`);
+    // Surface notable tooling from deps
+    const all = { ...pkg?.dependencies, ...pkg?.devDependencies };
+    const toolingHighlights = [];
+    if (all["tailwindcss"] || all["@tailwindcss/vite"]) toolingHighlights.push("Tailwind CSS");
+    if (all["prisma"] || all["@prisma/client"]) toolingHighlights.push("Prisma ORM");
+    if (all["drizzle-orm"]) toolingHighlights.push("Drizzle ORM");
+    if (all["@trpc/server"] || all["trpc"]) toolingHighlights.push("tRPC");
+    if (all["zod"]) toolingHighlights.push("Zod");
+    if (all["zustand"]) toolingHighlights.push("Zustand");
+    if (all["@tanstack/react-query"] || all["react-query"]) toolingHighlights.push("React Query");
+    if (all["socket.io"] || all["ws"]) toolingHighlights.push("WebSockets");
+    if (all["stripe"]) toolingHighlights.push("Stripe");
+    if (all["openai"]) toolingHighlights.push("OpenAI");
+    if (all["@google/genai"] || all["@google/generative-ai"]) toolingHighlights.push("Google Gemini");
+    if (all["redis"] || all["ioredis"]) toolingHighlights.push("Redis");
+    if (all["mongodb"] || all["mongoose"]) toolingHighlights.push("MongoDB");
+    if (all["pg"] || all["postgres"]) toolingHighlights.push("PostgreSQL");
 
-    if (signals.length > 0) {
-      summary += ` The repository has ${signals.join(", ")}.`;
-    }
+    const combinedStack = [...new Set([...notableStack, ...toolingHighlights])].slice(0, 4);
+    const stackSentence = combinedStack.length > 0
+      ? ` It uses ${combinedStack.join(", ")}.`
+      : "";
 
-    return summary;
+    // ── Sentence 3: health & maturity signals ───────────────────────────────
+    const healthSignals = [];
+    if (depsCount > 0) healthSignals.push(`${depsCount} production ${depsCount === 1 ? "dependency" : "dependencies"}`);
+    if (devDepsCount > 0) healthSignals.push(`${devDepsCount} dev ${devDepsCount === 1 ? "dependency" : "dependencies"}`);
+    if (testCount > 0) healthSignals.push(`${testCount} test file${testCount === 1 ? "" : "s"}`);
+    if (hasCI) healthSignals.push("CI/CD configured");
+    if (hasDocker) healthSignals.push("Docker support");
+    if (stars != null && stars > 100) healthSignals.push(`${stars.toLocaleString()} GitHub stars`);
+    else if (stars != null && stars > 0) healthSignals.push(`${stars} GitHub stars`);
+
+    const healthSentence = healthSignals.length > 0
+      ? ` The repository has ${healthSignals.join(", ")}.`
+      : "";
+
+    // ── Sentence 4: quality gaps (only if notable) ──────────────────────────
+    const gaps = [];
+    if (testCount === 0) gaps.push("no automated tests");
+    if (!hasCI) gaps.push("no CI configuration");
+    if (!readme || readme.length < 200) gaps.push("minimal documentation");
+
+    const qualitySentence = gaps.length >= 2
+      ? ` Key gaps: ${gaps.join(" and ")}.`
+      : "";
+
+    return `${identity}${stackSentence}${healthSentence}${qualitySentence}`.trim();
   }
 }

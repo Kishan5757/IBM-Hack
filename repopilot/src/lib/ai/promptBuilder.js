@@ -173,12 +173,15 @@ export function buildAnalysisPrompt(repoData) {
     `- GitHub metadata: ${metadata.language ? `language=${metadata.language}` : "none"}`,
   ].join("\n");
 
-  return `You are an expert software engineer performing a thorough repository analysis for the RepoPilot dashboard.
+  return `You are a senior software engineer performing a deep, thorough repository analysis for the RepoPilot dashboard.
 
-You MUST populate EVERY field in the JSON schema with real, useful content.
-NEVER return empty arrays for setup steps, environment variables, or test stats — always provide reasonable values based on available evidence.
-When source files are not available, use the file tree + metadata + package.json to make well-reasoned inferences.
-When package.json IS available, list ALL dependencies in the nodes array — not just a few.
+CRITICAL RULES — violating any of these will break the UI:
+1. Return ONLY valid JSON. No markdown fences, no explanations, no prose outside JSON.
+2. NEVER leave stats, setup steps, or actionPlan as empty arrays — always populate with real values.
+3. Every string field must contain meaningful, repo-specific content. Generic filler like "This is a project" is NOT acceptable.
+4. testing.stats MUST have EXACTLY these 4 entries (in order): "Test Files", "Coverage Estimate", "Framework", "Source Files".
+5. testing.generatedTests MUST contain runnable test code, not placeholder comments.
+6. overview.summary MUST be 3-4 sentences that describe what this specific repo actually does.
 
 EVIDENCE AVAILABLE FOR THIS ANALYSIS:
 ${evidenceSummary}
@@ -206,54 +209,82 @@ ${configFilesStr}
 === TEST FILES ===
 ${testFilesStr}
 
-=== INSTRUCTIONS PER SECTION ===
+=== DEEP ANALYSIS INSTRUCTIONS ===
 
-**repository**: Detect language and framework from package.json, file extensions in the tree, and imports in source files.
+**repository**:
+- Detect language from file extensions + package.json + GitHub metadata
+- Detect framework from package.json dependencies (next → Next.js, react → React, express → Express, etc.)
+- stack: list the full technology stack including language, framework, UI libraries, ORMs, test frameworks, and build tools
 
-**overview.summary**: Write 2-3 real sentences describing what this project appears to do based on its name, description, file structure, and source code. Do NOT write generic filler.
+**overview.summary**:
+Write 3-4 specific sentences describing what this project does. Cover:
+1. What the project is and who it's for (based on name, description, code)
+2. What technology stack it uses
+3. Notable features or architectural patterns visible in the code
+4. Repository health (test coverage, CI, documentation quality)
+Do NOT write generic filler. Every sentence must be grounded in the actual evidence.
 
-**readme.generatedMarkdown**: Write a COMPLETE, professional README.md using ALL available evidence:
-- Use the actual repo name as the title
-- Base the description on metadata.description and source code analysis
-- List real installation steps (detect package manager from package.json/yarn.lock/pnpm-lock.yaml)
-- Show real usage examples derived from source files or scripts
-- List real dependencies from package.json
-- Add real configuration notes if .env files or config files are present
-- Include a proper license section if detectable
+**readme.generatedMarkdown**:
+Write a COMPLETE professional README.md (minimum 400 words) using all available evidence:
+- Title: actual repo name with a badge row (build status, license, npm version if applicable)
+- Description: derived from metadata.description and source code analysis — be specific
+- Features: list 4-6 actual features inferred from the source code and file structure
+- Prerequisites: Node.js version from engines field, Python version, etc.
+- Installation: use actual package manager (detect from lockfile: yarn.lock→yarn, pnpm-lock.yaml→pnpm, else npm)
+- Configuration: list every .env variable found in source/config files with descriptions
+- Usage: real examples from actual scripts in package.json or inferred from source files
+- API reference (if applicable): key endpoints or exported functions visible in source
+- Contributing: standard fork→branch→PR flow
+- License: detected from package.json.license or LICENSE file in tree
 
-**setup.requiredSteps**: Always provide AT LEAST 3-4 steps. Use actual commands from package.json scripts. If no package.json, infer from file extensions (Python→pip install, etc).
-Example minimum for a Node.js project: clone, npm install, configure env, npm run dev.
+**setup.requiredSteps**: MINIMUM 4 steps using real commands from package.json.scripts. Always include: clone, install, configure env (if env vars found), start/dev command.
 
-**setup.environmentVariables**: Search source files and config files for process.env.*, os.environ, dotenv references. If .env.example exists in config files, list every variable in it. If nothing found, return [].
+**setup.environmentVariables**: Scan EVERY source and config file for process.env.VAR_NAME, os.environ['VAR'], dotenv patterns. List them all with realistic example values.
 
-**setup.dockerCommand / dockerCompose**: If Dockerfile or docker-compose.yml exists, provide real commands. Otherwise return empty strings.
+**testing.framework**: Detect from devDependencies (jest, vitest, mocha, pytest, go test, etc.) or test file naming patterns.
 
-**testing.framework**: Detect from package.json devDependencies (jest, vitest, mocha, pytest, etc.) or test file patterns.
-**testing.sourceCode**: Copy the FULL content of the most interesting/complex source file into this field for display.
-**testing.generatedTests**: Generate REAL test code for the source file shown. Use the detected framework. Include actual function names and import paths from the real code. Do NOT write placeholder comments.
-**testing.stats**: ALWAYS include at least 3 stats: "Test Files" (count), "Coverage Estimate" (%), "Framework" label.
+**testing.sourceCode**: Copy the COMPLETE content of the most complex/interesting source file verbatim. Prefer files with exported functions/classes over config files.
 
-**deadCode**: Examine imports and exports in source files. Flag symbols that are imported/defined but appear unused within the fetched files. Always include the actual file path and line number if visible. If you cannot see enough code to be certain, use confidence 40-60 and mark as "potentially unused". Return [] only if truly no evidence.
+**testing.generatedTests**: Write REAL, RUNNABLE test code for the source file shown:
+- Use the EXACT function/class names from the source code
+- Use the EXACT import paths
+- Write meaningful assertions (not just toBeDefined())
+- Cover: happy path, edge cases (null/empty/boundary), error conditions
+- Minimum 3 test cases per exported function
+
+**testing.stats**: EXACTLY 4 items:
+1. {"label":"Test Files","value":"<count from file tree>","color":"emerald|rose"}
+2. {"label":"Coverage Estimate","value":"<percent>","color":"emerald|amber|rose"}
+3. {"label":"Framework","value":"<framework name>","color":"indigo"}
+4. {"label":"Source Files","value":"<count from file tree>","color":"indigo"}
+For "Test Files" count: count all files matching *.test.*, *.spec.*, __tests__/, /tests/, /test/ in the file tree.
+For "Source Files" count: count all .js/.ts/.jsx/.tsx/.py/.go/.rs/.java files (excluding test files) in the file tree.
+
+**deadCode**: Scan imports vs exports across all source files. Flag:
+- Imported symbols never used in the file
+- Exported functions/classes with no imports elsewhere in the fetched files
+- Variables declared but never read
+- Commented-out code blocks over 10 lines
+Include exact file path and line number. Use confidence 70-90 for clear cases, 40-60 for inferred cases.
 
 **dependencies.nodes**:
-- ALWAYS include a root node: {"id":"root","label":"${repositoryName}","type":"root","health":"ok"}
-- Then list EVERY dependency from package.json (both dependencies and devDependencies)
-- Mark health: "ok" for most packages, "warning" for known old major versions, "critical" for known CVEs
-- If no package.json, return just the root node
+- Root node first: {"id":"root","label":"${repositoryName}","type":"root","health":"ok"}
+- Add EVERY package from both dependencies AND devDependencies
+- health: "critical" for known CVEs, "warning" for outdated major versions, "ok" otherwise
 
-**dependencies.alerts**: Only include if you have real evidence of vulnerabilities. Do not invent CVE numbers.
+**dependencies.alerts**: Real CVEs only. Check: lodash<4.17.21 (prototype pollution), minimist<1.2.6, axios<0.21.2, serialize-javascript<4.0, json5<2.2.2, semver<7.5.2.
 
-**dependencies.outdated**: Compare the versions in package.json against your knowledge of current releases. Only list packages where you are confident the version is outdated.
+**dependencies.outdated**: Flag packages where installed major version is behind current (react<19, next<15, typescript<5, tailwindcss<4, eslint<9, vite<6, webpack<5).
 
-**actionPlan**: Always provide 3-5 concrete, prioritised recommendations based on what you found.
+**actionPlan**: 4-5 specific, prioritised recommendations. Each must reference an actual finding from this repo. High priority: security issues, missing tests. Medium: outdated deps, README gaps. Low: CI, code quality, env.example.
 
 === JSON SCHEMA ===
-Return ONLY valid JSON (no markdown fences, no explanation) matching this schema exactly:
+Return ONLY valid JSON matching this schema exactly:
 
 ${SCHEMA_LITERAL}
 
-SCORING:
-- healthScore: Start at 100. -15 per critical issue, -5 per warning. Range 0-100.
-- readme.qualityScore: title(15) + description(15) + installation(20) + usage(20) + contributing(15) + license(15) = max 100.
-- testing.stats colors: use "emerald" for good values, "amber" for warnings, "rose" for bad, "indigo" for neutral info.`;
+SCORING RULES:
+- healthScore: Start at 100. Subtract 15 per CRITICAL security issue, 8 per missing test suite, 5 per outdated major dependency, 5 per missing README section. Floor: 10.
+- readme.qualityScore: title(15) + description(15) + installation(20) + usage(20) + contributing(15) + license(15) = max 100. Score what actually exists.
+- testing.stats colors: "emerald" = good (tests exist, coverage >50%), "amber" = warning (low coverage), "rose" = bad (0 tests, 0%), "indigo" = neutral info.`;
 }
