@@ -1,4 +1,4 @@
-# -- Secrets — NEVER commit these ---------------------------------------------
+# -- Secrets ï¿½ NEVER commit these ---------------------------------------------
 .env
 .env.*
 !.env.*.example
@@ -42,4 +42,4 @@ Thumbs.db
 # -- Bob session logs (local only) ---------------------------------------------
 dev-out.txt
 dev-err.txt
-bob_sessions/
+
