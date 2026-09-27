@@ -123,8 +123,19 @@ export async function POST(request) {
   // ── 3. Run AI analysis (Gemini → Rule Engine fallback, never throws) ───────
   console.log("[RepoPilot] Starting AI analysis...");
   const aiService = getAIService();
-  // AIService always resolves — rule engine is the guaranteed fallback
-  const result = await aiService.analyzeRepository(repositoryContext);
+
+  let result;
+  try {
+    // AIService always resolves — rule engine is the guaranteed fallback
+    result = await aiService.analyzeRepository(repositoryContext);
+  } catch (err) {
+    // This should never happen, but guard against it to always return valid JSON
+    console.error("[RepoPilot] Unexpected fatal error during analysis:", err?.message || err);
+    return NextResponse.json(
+      { error: "Analysis engine encountered an unexpected error. Please try again.", code: "ANALYSIS_ERROR" },
+      { status: 500 }
+    );
+  }
 
   // ── 4. Return structured analysis + provider attribution ───────────────────
   const { analysis, providerMeta } = result;

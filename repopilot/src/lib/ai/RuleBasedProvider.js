@@ -115,16 +115,82 @@ export class RuleBasedProvider {
    * @returns {Promise<import('./schemas.js').RepositoryAnalysis>}  — always resolves, never rejects
    */
   async analyzeRepository(repositoryContext) {
+    const name = repositoryContext.repositoryName || "unknown-repo";
     console.log(
-      `[RuleBasedProvider] Analyzing ${repositoryContext.repositoryName} with local rule engine v2`
+      `[RuleBasedProvider] Analyzing ${name} with local rule engine v2`
     );
-    // Synchronous analysis — wrapped in Promise so the interface is consistent
-    const analysis = this._analyze(repositoryContext);
-    console.log(
-      `[RuleBasedProvider] Done — healthScore: ${analysis.overview.healthScore}, ` +
-        `steps: ${analysis.setup.steps.length}, deps: ${analysis.dependencies.nodes.length}`
-    );
-    return analysis;
+    try {
+      const analysis = this._analyze(repositoryContext);
+      console.log(
+        `[RuleBasedProvider] Done — healthScore: ${analysis.overview.healthScore}, ` +
+          `steps: ${analysis.setup.steps.length}, deps: ${analysis.dependencies.nodes.length}`
+      );
+      return analysis;
+    } catch (err) {
+      // Rule engine must NEVER propagate — return a safe minimal result
+      console.error(`[RuleBasedProvider] Unexpected error for ${name}:`, err?.message || err);
+      return this._minimalFallback(name, repositoryContext);
+    }
+  }
+
+  /** Emergency fallback — returned when _analyze() itself throws. */
+  _minimalFallback(name, ctx) {
+    const language = ctx?.metadata?.language || "Unknown";
+    const ghSlug = ctx?.metadata?.githubSlug;
+    return {
+      repository: { name, stack: [language].filter(s => s !== "Unknown"), framework: language, language },
+      overview: {
+        summary: `${name} is a ${language !== "Unknown" ? language : "software"} project. Automated analysis encountered an issue — please try again or check the repository manually.`,
+        healthScore: 50,
+        criticalIssues: 0,
+        warnings: 1,
+      },
+      readme: {
+        qualityScore: 0,
+        missingSections: ["Installation", "Usage", "Contributing", "License"],
+        issues: ["README could not be fully analyzed"],
+        generatedMarkdown: `# ${name}\n\n> A ${language !== "Unknown" ? language : "software"} project.\n\n## Getting Started\n\n\`\`\`bash\ngit clone https://github.com/${ghSlug || `your-username/${name.toLowerCase()}`}.git\ncd ${name.toLowerCase()}\n\`\`\`\n\n## Contributing\n\nContributions welcome! Open a pull request.\n\n## License\n\nSee LICENSE file for details.`,
+        markdown: `# ${name}\n\nSee above.`,
+      },
+      setup: {
+        status: "warning",
+        issues: [],
+        requiredSteps: [
+          { id: 1, title: "Clone the repository", command: `git clone https://github.com/${ghSlug || `your-username/${name.toLowerCase()}`}.git`, description: "Clone the project." },
+        ],
+        steps: [
+          { id: 1, title: "Clone the repository", command: `git clone https://github.com/${ghSlug || `your-username/${name.toLowerCase()}`}.git`, description: "Clone the project." },
+        ],
+        environmentVariables: [],
+        envVars: [],
+        runtimeRequirements: [],
+        dockerCommand: "",
+        dockerCompose: "",
+      },
+      testing: {
+        framework: "None detected",
+        testFilesFound: [],
+        missingTests: [],
+        recommendations: ["Add tests to improve code quality and reliability."],
+        sourceCode: "",
+        generatedTests: `// No tests generated — analysis encountered an error.\n// Please re-run the analysis.`,
+        stats: [
+          { label: "Test Files",        value: "0",              color: "rose"   },
+          { label: "Coverage Estimate", value: "0%",             color: "rose"   },
+          { label: "Framework",         value: "None detected",  color: "indigo" },
+          { label: "Source Files",      value: "0",              color: "indigo" },
+        ],
+      },
+      deadCode: [],
+      dependencies: {
+        nodes: [{ id: "root", label: name, type: "root", health: "ok" }],
+        alerts: [],
+        outdated: [],
+      },
+      actionPlan: [
+        { priority: "medium", title: "Re-run analysis", reason: "The analysis engine encountered an unexpected error.", recommendation: "Try analysing the repository again. If the issue persists, check the Vercel function logs." },
+      ],
+    };
   }
 
   // ─── Core analysis ──────────────────────────────────────────────────────────

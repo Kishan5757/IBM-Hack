@@ -148,13 +148,24 @@ export default function Dashboard({ onBack, onReset, darkMode, toggleDark, repoN
         signal: AbortSignal.timeout(120_000), // 2 min — rule engine is instant
       });
 
-      const json = await response.json();
+      // Safely parse JSON — the server always returns JSON, but guard against
+      // edge cases (e.g. Vercel function timeout returns an empty 504 body).
+      let json;
+      const rawText = await response.text();
+      try {
+        json = JSON.parse(rawText);
+      } catch {
+        throw new Error(
+          response.status === 504
+            ? "The analysis timed out. Please try again — large repositories can take longer."
+            : `Server returned an unexpected response (HTTP ${response.status}). Please try again.`
+        );
+      }
 
       // Stage 3 → 4
       setAnalysisStage(4);
 
       if (!response.ok) {
-        // The only non-200 we can get now is a bad request or a JSON parse error
         throw new Error(json?.error || `Server error ${response.status}`);
       } else {
         setAnalysisData(json.analysis);
