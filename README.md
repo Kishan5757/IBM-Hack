@@ -161,3 +161,74 @@ RepoPilot uses a provider-based AI architecture.
        └─────────────┼─────────────┘
                      │
              Testing / Code Health
+```
+
+## 🏗️ Project Structure
+
+```text
+IBM-Hack/
+│
+├── bob_sessions/
+│   ├── task01_repopilot_history.md
+│   ├── task01_repopilot_summary.png
+│   ├── task02_repopilot_history.md
+│   ├── task02_repopilot_summary.png
+│   ├── task03_repopilot_history.md
+│   ├── task03_repopilot_apiintegration.png
+│   ├── task04_repopilot_history.md
+│   ├── task04_repopilot_summary.png
+│   ├── task05_repopilot_history.md
+│   └── task05_repopilot_summary.png
+│
+└── repopilot/
+    │
+    ├── src/
+    │   ├── app/
+    │   │   ├── api/
+    │   │   │   └── analyze-repository/
+    │   │   │       └── route.js
+    │   │   ├── globals.css
+    │   │   ├── layout.tsx
+    │   │   └── page.tsx
+    │   │
+    │   ├── components/
+    │   │   ├── ChatBot.jsx
+    │   │   ├── Dashboard.jsx
+    │   │   ├── FeatureSelection.jsx
+    │   │   ├── OrbitLanding.jsx
+    │   │   └── FeatureTabs/
+    │   │       ├── DeadCodeDetector.jsx
+    │   │       ├── DependencyAnalyzer.jsx
+    │   │       ├── ReadmeGenerator.jsx
+    │   │       ├── SetupAssistant.jsx
+    │   │       └── TestGenerator.jsx
+    │   │
+    │   ├── data/
+    │   │   ├── mockRepoData.js
+    │   │   └── repoIntelligence.js
+    │   │
+    │   ├── lib/
+    │   │   └── ai/
+    │   │       ├── AIService.js
+    │   │       ├── GeminiProvider.js
+    │   │       ├── HuggingFaceProvider.js
+    │   │       ├── LocalAIProvider.js
+    │   │       ├── RuleBasedProvider.js
+    │   │       ├── index.js
+    │   │       ├── promptBuilder.js
+    │   │       ├── responseNormalizer.js
+    │   │       └── schemas.js
+    │   │
+    │   ├── lib/
+    │   │   └── geminiService.js
+    │   │
+    │   └── utils/
+    │       └── repoExtractor.js
+    │
+    ├── .env.local.example
+    ├── next.config.ts
+    ├── package.json
+    ├── postcss.config.mjs
+    ├── tsconfig.json
+    └── vercel.json
+```
